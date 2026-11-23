@@ -11,7 +11,8 @@ class UAnimSequence;
 
 /**
  *  Evaluates the Anim Blueprint graph and then layers on top of it:
- *  1. the stance (how the equipped weapons are carried) on both arms,
+ *  1. the stance (how the equipped weapons are carried) on both arms, and on the rest of the body
+ *     while the character stands (bent knees of the combat stance),
  *  2. an "overlay" animation such as an attack: fully on the upper body, and on the lower body
  *     only as far as LowerBodyWeight says.
  */
@@ -47,6 +48,10 @@ private:
 	const UAnimSequence* Stance = nullptr;
 	const UAnimSequence* PreviousStance = nullptr;
 	float StanceAlpha = 1.f;
+	float StanceArmWeight = 1.f;
+	float PreviousStanceArmWeight = 1.f;
+	bool bStanceWholeBody = false;
+	bool bPreviousStanceWholeBody = false;
 	TArray<FName> StanceRootBones;
 
 	/** Per compact-pose bone: 1 if the bone belongs to the upper body / to the arms that hold the stance */
@@ -72,9 +77,11 @@ public:
 	/**
 	 *  Sets how the equipped weapons are carried: the arms take this pose in every locomotion state,
 	 *  so a held weapon or shield never swings through the body. Null = arms follow the Anim Blueprint.
+	 *  ArmWeight below 1 only pulls the arms part of the way toward the pose (calms their swing).
+	 *  bWholeBodyWhenStanding: while the character stands, the rest of the body takes the pose too.
 	 */
 	UFUNCTION(BlueprintCallable, Category="Overlay")
-	void SetStance(UAnimSequence* Sequence, float BlendTime = 0.25f);
+	void SetStance(UAnimSequence* Sequence, float BlendTime = 0.25f, float ArmWeight = 1.f, bool bWholeBodyWhenStanding = false);
 
 	/** Plays an animation on top of the Anim Blueprint's pose. Calling it while one is playing cross-fades into the new one. */
 	UFUNCTION(BlueprintCallable, Category="Overlay")
@@ -168,6 +175,10 @@ private:
 
 	float StanceAlpha = 1.f;
 	float StanceBlendTime = 0.25f;
+	float StanceArmWeight = 1.f;
+	float PreviousStanceArmWeight = 1.f;
+	bool bStanceWholeBody = false;
+	bool bPreviousStanceWholeBody = false;
 
 	/** Overlay time at which the animation freezes (< 0 = plays to its end) */
 	float OverlayStopTime = -1.f;

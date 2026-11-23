@@ -88,11 +88,8 @@ na řádcích `OWSELFTEST` a `OWCONTACT`: polohy rukou, zásahy do dřeva a ocel
 **Stav.** Hotovo: kamera, sprint, dvě sestavy zbraní s držením a seky, útok za běhu, kontrola průniků
 animací, látky ocel a dřevo, střet čepele se zastavením o povrch a fyzikální reakcí.
 
-**Co pravidlo 1 zatím nesplňuje:**
-- Nesená zbraň projde zdí, když k ní postava dojde. Střet se hlídá jen během seku.
-- U postav se zásah počítá na kolizní kapsli, ne na povrch těla.
-- Deformace a viditelné poškození neexistují. Předmět má jen výdrž a po jejím vyčerpání zmizí.
-- Štít útoky nekryje (zatím nikdo neútočí).
+**Další na řadě** (podrobnosti ve „Fyzika ve hře“): pohyb tasení a schování zbraní, pak držený
+předmět odtlačovaný překážkou. Co pravidlo 1 zatím nesplňuje, je tamtéž v otevřených otázkách.
 
 ## Pravidla
 
@@ -119,6 +116,86 @@ Krátce a obecně, aby poučení platilo i mimo ten jeden případ. Bez popisu, 
 
 Před prací v oblasti, které se některé poučení týká, si ho přečíst.
 
+## Fyzika ve hře
+
+Tady je sepsané, jak se ve hře věci chovají při dotyku. Dnešní stav je výchozí bod, který se bude
+postupně ladit. Každou změnu chování zapsat sem, včetně čísel.
+
+### Zásady
+
+1. **Všechno pevné má povrch a látku.** Povrch je kolizní tvar, látka (`UOpenWorldPhysicalMaterial`)
+   říká, jak je věc tvrdá, těžká a kolik vydrží.
+2. **Pohyb se zastaví o povrch.** Nic se nevykreslí uvnitř něčeho jiného, ani na jeden snímek.
+   Proto se dotyk hledá dopředu, v póze, která se teprve vykreslí.
+3. **O následku rozhodnou látky a hybnost,** ne animace. Tvrdost určí, jestli se čepel zasekne, nebo
+   odskočí. Hmotnost a rychlost určí ráz.
+4. **Platí to oběma směry.** Když se čepel zastaví o bednu, musí se i bedna zastavit o čepel.
+5. **I cesta zpět je pohyb.** Po dotyku se věc vrací dráhou, o které se ví, že je volná.
+
+### Výchozí stav (hodnoty k ladění)
+
+Všechny jsou nastavitelné v `BP_ThirdPersonCharacter` (sekce Combat | Contact a Loadouts) nebo
+ve skriptu `Tools/create_materials.py`.
+
+| Co | Dnes | Kde |
+|---|---|---|
+| Tvrdost oceli / dřeva | 7,5 / 2,5 | `create_materials.py` |
+| Hustota oceli / dřeva | 7,85 / 0,70 g/cm³ | `create_materials.py` |
+| Houževnatost oceli / dřeva | 4,0 / 1,0 | `create_materials.py` |
+| Čepel se zasekne, když je tvrdší aspoň | 1,2× | `BiteHardnessRatio` |
+| Zaseknutí: jak dlouho drží, jak rychle se vrací | 0,12 s, 1,2× rychlost seku | `BiteHoldTime`, `BiteRewindRate` |
+| Odskok: jak dlouho drží, jak rychle se vrací | 0,04 s, 2,0× rychlost seku | `BounceHoldTime`, `BounceRewindRate` |
+| Poškození | základ sestavy × poměr tvrdostí (0,2–3) × rychlost čepele / 1200 cm/s (0,2–2) ÷ houževnatost cíle | `ResolveContact` |
+| Ráz | rychlost čepele × hmotnost zbraně × 3 (váha těla za čepelí) | `StrikeMassScale` |
+| Hmotnost meče / obouručního meče | 1,3 / 2,8 kg | sestavy |
+| Okno, kdy čepel zasahuje | 0,27–0,52 s / 0,34–0,66 s od začátku seku | sestavy |
+| Neznámý povrch bez látky | tvrdost 5 | `DefaultHardness` |
+
+### Zbraně: nebojový a bojový stav
+
+Zadal uživatel. Logika je v `OpenWorldCharacter` (`DrawWeapons`, `SheatheWeapons`, `ApplyWeaponState`).
+
+- **Nebojový stav je výchozí.** Jednoruční meč je v pochvě u levého boku a štít na zádech. Obouruční
+  meč je na zádech. Ruce jsou volné a hýbou se podle běžných animací.
+- **Levé tlačítko v nebojovém stavu zbraně jen tasí,** neútočí.
+- **Bojový střeh:** štít před levou částí hrudi, meč připravený vpravo, nebo kryt obouručním mečem
+  před hrudí. Ve stoje jsou kolena pokrčená (pánev o 5 cm níž) a trup lehce předkloněný. Za chůze
+  a běhu drží střeh jen paže, nohy a trup jdou z běžných animací.
+- **Levé tlačítko v bojovém stavu je útok.** Při seku mečem ustoupí štít doleva, aby mu nestál v cestě.
+- **Po 15 s od posledního stisku levého tlačítka** (`CombatTimeout`) se zbraně vrátí na tělo.
+- **Se štítem na zádech se paže houpou jen napůl** (`SheathedArmDamping` 0,5). Běžná animace běhu
+  vede lokty až 30 cm za záda, kam se štít nevejde. Hodnota musí být stejná v `owlib.py` i v sestavě.
+- **Polohy zbraní na těle** hledá `create_attack_anims.py` proti povrchu těla ve všech snímcích stání,
+  chůze a běhu a zapisuje je do `Tools/mounts.json` (pro kontrolu) a do
+  `Source/OpenWorld/OpenWorldGeneratedMounts.h` (pro hru). Ručně se needitují.
+
+**Co chybí:** pohyb tasení a schování. Zbraň dnes přeskočí z těla do ruky a paže se do střehu jen
+prolnou (0,3 s). Správně má meč vyjet z pochvy po její ose a štít se přehodit ze zad, bez průniku.
+
+### Držený předmět u překážky (rozhodnuto, zatím neuděláno)
+
+Dnes nesená zbraň stěnou projde, střet se hlídá jen během seku. Rozhodnutí uživatele:
+
+- **Zbraň se neschovává ani nepřepíná do jiné pózy.** Postava ji drží dál.
+- **Překážka na předmět působí fyzikálně.** Body předmětu (meče, štítu, čehokoli v ruce) se posunou
+  podle toho, jak proti nim stěna tlačí: předmět ustoupí jen o tolik, o kolik musí, a paže ho následuje.
+- **Rozhoduje, jestli předmět překážku prorazí.** Většinou ne, zvlášť když postava jen stojí. Kdy
+  ano, určí látky a hybnost, stejně jako u seku.
+- Platí to pro jakýkoli držený předmět, ne jen pro meč.
+
+Přepínání mezi dvěma pevnými pózami podle překážek bylo zamítnuto: v boji u stěny by bralo kontrolu
+nad zbraní a reagovalo by i na nepřátele.
+
+### Otevřené otázky
+
+- **Jak přesně stěna na předmět působí** (viz „Držený předmět u překážky“ výše): kolik bodů
+  předmětu sledovat, jak rychle se smí vracet a kdy se místo předmětu má pohnout nebo rozbít překážka.
+- **Zbraně v nebojovém stavu** leží na těle, takže by se do stěn dostat neměly. Obouruční meč na
+  zádech je ale delší než trup a je potřeba změřit, kam přesahuje.
+- **Zásah do postav** se počítá na kolizní kapsli, ne na povrch těla.
+- **Deformace a viditelné poškození** nejsou. Předmět má jen výdrž a po jejím vyčerpání zmizí.
+- **Štít** útoky nekryje.
+
 ## Poučení z chyb
 
 - **Vstupy cizích funkcí neodhadovat.** Engine shodil hru, protože funkce na prolínání kostí vyžaduje
@@ -136,6 +213,14 @@ Před prací v oblasti, které se některé poučení týká, si ho přečíst.
 - **Počítat s tím, že uložení data změní.** Uložená animace se po kompresi lišila od vypočítané až
   o 2 cm a délka mimo násobek 1/30 s kompresi shodila. Po uložení načíst zpět a změřit znovu,
   s rezervou na nepřesnost.
+- **Návrh nejdřív projít v hlavní herní situaci.** Navrhl jsem stahování zbraně u překážek a neověřil,
+  co udělá v boji u stěny, kde by hráči bralo zbraň z ruky. Než začnu řešení stavět, projít si ho
+  ve chvíli, kdy na něm hráči záleží nejvíc, a u větších změn chování ho nejdřív popsat uživateli.
+- **Hledání musí vzorkovat stejně hustě jako kontrola.** Polohy zbraní na těle jsem hledal na 18 pózách,
+  kontrola pak na všech snímcích našla ruku míjející záštitu a patu u hrotu meče, obojí jen na snímek
+  či dva. Co se ověřuje hustě, musí se hustě i navrhovat (hrubý výběr, pak přesné ověření nejlepších).
+- **Podezření na chybu měření ověřit daty, ne úvahou.** U štítu na zádech jsem výsledek považoval za
+  chybu měření, ale výpis konkrétních bodů ukázal, že je správně (lokty při běhu jdou 30 cm za záda).
 - **Cesta zpět je taky pohyb.** Meč se o terč zastavil správně, ale při návratu do držení jím projel
   (15,9 cm). Každý pohyb, i ten „úklidový“ po hlavní akci, musí splnit stejná pravidla jako akce sama.
 - **Pravidlo o dvou věcech platí oběma směry.** Čepel se zastavila o bednu, ale bedna pak vjela do

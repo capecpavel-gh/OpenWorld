@@ -1,10 +1,13 @@
 """
-Generates the weapon hold poses ("stances") and attack animations of the player character:
-  /Game/Weapons/Sword/Anims/AS_Stance_SwordShield       how sword and shield are carried
+Generates everything about how the player character carries and swings its weapons:
+  /Game/Weapons/Sword/Anims/AS_Stance_SwordShield       combat stance: shield in front, sword ready
   /Game/Weapons/Sword/Anims/AS_SwordSlash               one-handed diagonal slash
-  /Game/Weapons/Greatsword/Anims/AS_Stance_Greatsword   how the two-handed sword is carried
+  /Game/Weapons/Greatsword/Anims/AS_Stance_Greatsword   combat stance: two-handed guard
   /Game/Weapons/Greatsword/Anims/AS_GreatswordSlash     two-handed diagonal slash
+  Tools/mounts.json, Source/OpenWorld/OpenWorldGeneratedMounts.h
+                                                        where the weapons sit on the body when put away
 Both slashes cut from the upper right to the lower left, in front of the body, and start and end in the stance.
+In the combat stance the knees are slightly bent; the game applies that part only while standing.
 
 Everything is solved against the character's collision surface (owlib.BodySurface) and the shapes of the
 weapons: nothing may pass through anything (see CLAUDE.md). The script reports the deepest overlap per
@@ -26,10 +29,12 @@ Environment variables:
   SLASH_PREVIEW=1     only write the stick-figure previews (Saved/<name>_Preview.png: back view,
                       right-side view, top view) without touching assets
   SLASH_ONLY=<setup>  only generate this setup ("sword_shield" or "greatsword")
+  SLASH_MOUNTS_ONLY=1 only place the put-away weapons (and write the mounts), without the animations
 
 Character space: +Y forward, +Z up, -X is the character's right side.
 Sword in hand_r bone space: blade = +Z, flat side normal = Y, fingers = -X.
 """
+import json
 import math
 import os
 import sys
@@ -63,6 +68,11 @@ def in_plane(forward, along_slash):
 
 REST = dict(hand=None, blade=None, twist=0.0, lean=0.0, pelvis_yaw=0.0, pelvis=(0.0, 0.0, 0.0))
 
+# The combat stance's body: hips dropped (knees bent, feet where they were) and a slight forward lean.
+# Every key's pelvis offset and lean is on top of this.
+COMBAT_PELVIS = (0.0, 2.0, -5.0)
+COMBAT_LEAN = 5.0
+
 # stance:
 #   right        wrist position, blade direction and the normal of the blade's flat side
 #   left         "shield": wrist position, direction the shield faces, its up direction
@@ -80,10 +90,19 @@ SETUPS = {
         loadout="sword_shield", out_dir="/Game/Weapons/Sword/Anims", stance_name="AS_Stance_SwordShield",
         stance=dict(
             # sword at the right side above the hip, point forward and up; clear of the leg even when it lifts in a run
-            right=dict(hand=(-31.0, 12.0, 110.0), blade=norm((-0.25, 0.72, 0.64)), flat=(1.0, 0.0, 0.0)),
-            # shield carried at the left side, forearm forward behind it
-            left=dict(kind="shield", hand=(31.0, 16.0, 116.0), facing=norm((0.96, 0.28, 0.0)), up=UP),
+            right=dict(hand=(-31.0, 12.0, 105.0), blade=norm((-0.25, 0.72, 0.64)), flat=(1.0, 0.0, 0.0)),
+            # shield held in front of the left chest, high enough to clear the knees in a run
+            left=dict(kind="shield", hand=(13.0, 30.0, 128.0), facing=norm((0.22, 0.975, 0.0)), up=UP),
         ),
+        # where the shield arm goes while the sword cuts across the front: out to the left side
+        open=dict(
+            right=dict(hand=(-31.0, 12.0, 105.0), blade=norm((-0.25, 0.72, 0.64)), flat=(1.0, 0.0, 0.0)),
+            left=dict(kind="shield", hand=(31.0, 16.0, 111.0), facing=norm((0.96, 0.28, 0.0)), up=UP),
+        ),
+        # how far the shield arm is opened at each key of the attack (0 = stance, 1 = open)
+        open_weights=[0.0, 0.7, 1.0, 1.0, 0.9, 0.0],
+        # weapons put away: item -> (bone it hangs on, candidate placements)
+        sheathed=dict(loadout="sword_shield_sheathed", items=dict(sword="hip", scabbard="hip", shield="back")),
         attack=dict(
             name="AS_SwordSlash", hit_time=0.38, combo_time=0.66,
             keys=[
@@ -110,9 +129,10 @@ SETUPS = {
         stance=dict(
             # both hands on the grip in front of the chest, blade up and a little forward ("high port");
             # the pommel stays above the thighs even when they lift in a run
-            right=dict(hand=(-5.0, 36.0, 130.0), blade=norm((-0.12, 0.48, 0.87)), flat=(1.0, 0.0, 0.0)),
+            right=dict(hand=(-5.0, 36.0, 125.0), blade=norm((-0.12, 0.48, 0.87)), flat=(1.0, 0.0, 0.0)),
             left=dict(kind="grip", offset=-13.0),
         ),
+        sheathed=dict(loadout="greatsword_sheathed", items=dict(greatsword="back_long")),
         attack=dict(
             name="AS_GreatswordSlash", hit_time=0.47, combo_time=0.84,
             keys=[
@@ -184,9 +204,10 @@ class Motion:
         self.arm_bones_l = [b for b in rig.bones if rig.ancestor_in(b, {"upperarm_l"})]
         self.arm_bones = [b for b in rig.bones if rig.ancestor_in(b, {"upperarm_l", "upperarm_r"})]
 
-        self.stance_local = None
-        self.stance = None          # right hand: dict(hand, pole, rot); left: dict(pole, roll) or the fixed arm
-        self.build_stance()
+        # stance: right hand dict(hand, pole, rot); left dict(pole_l, roll) when it grips the same weapon
+        self.stance_local, self.stance = self.build_hold(setup["stance"], setup["stance_name"])
+        # the shield arm's second pose, used while the sword cuts across the front
+        self.open_local = self.build_hold(setup["open"], setup["stance_name"] + " (shield open)")[0] if "open" in setup else None
         self.key_hands = None
         self.key_poles = None
         self.key_rolls = None
@@ -259,19 +280,23 @@ class Motion:
             world = rig.fk(local)
             rig.set_world_rot(local, world, bone, qmul(counter, world[bone][1]))
 
-    def body_pose(self, u):
-        """Idle body with closed fists, moved by the keys' pelvis and torso values. Arms are not posed yet."""
-        keys = self.keys
+    def posed_body(self, twist=0.0, lean=0.0, pelvis_yaw=0.0, pelvis=(0.0, 0.0, 0.0)):
+        """The combat stance's body (knees bent, slight lean, closed fists) moved by the given pelvis and
+        torso values. Arms are not posed yet."""
         local = dict(self.rig.base)
-        twist = catmull([k["twist"] for k in keys], u, combine_scalar)
-        lean = catmull([k["lean"] for k in keys], u, combine_scalar)
-        pelvis_yaw = catmull([k["pelvis_yaw"] for k in keys], u, combine_scalar)
-        pelvis = catmull([k["pelvis"] for k in keys], u, combine_vec)
         self.apply_fist(local, "r")
         self.apply_fist(local, "l")
-        self.apply_pelvis(local, pelvis_yaw, pelvis)
-        self.apply_torso(local, twist, lean, twist + pelvis_yaw)
+        self.apply_pelvis(local, pelvis_yaw, add(COMBAT_PELVIS, pelvis))
+        self.apply_torso(local, twist, COMBAT_LEAN + lean, twist + pelvis_yaw)
         return local
+
+    def body_pose(self, u):
+        """The body at path parameter u of the attack."""
+        keys = self.keys
+        return self.posed_body(catmull([k["twist"] for k in keys], u, combine_scalar),
+                               catmull([k["lean"] for k in keys], u, combine_scalar),
+                               catmull([k["pelvis_yaw"] for k in keys], u, combine_scalar),
+                               catmull([k["pelvis"] for k in keys], u, combine_vec))
 
     # ---- contacts
 
@@ -428,20 +453,19 @@ class Motion:
             result.append((cost, pole, bend, twist, miss, elbow))
         return result
 
-    def build_stance(self):
-        """The pose the weapons are carried in: idle body, arms holding the weapons clear of the body."""
-        rig, spec = self.rig, self.setup["stance"]
-        local = dict(rig.base)
-        self.apply_fist(local, "r")
-        self.apply_fist(local, "l")
+    def build_hold(self, spec, label):
+        """A pose the weapons are held in: the combat stance's body, arms holding the weapons clear of the
+        body in every locomotion state. Returns (local pose, dict with the arm solution)."""
+        rig = self.rig
+        local = self.posed_body()
 
         right = spec["right"]
         pole, rot = self.best_right_arm(local, right["hand"], lambda forearm: [(right["blade"], right["flat"], 0.0)],
-                                        None, self.setup["stance_name"], carried=True)
+                                        None, label, carried=True)
         self.arm.solve(rig, local, right["hand"], pole=pole)
         local["hand_r"] = (local["hand_r"][0], rot)
         self.spread_forearm_twist(local, "r")
-        self.stance = dict(hand=right["hand"], pole=pole, rot=rot)
+        hold = dict(hand=right["hand"], pole=pole, rot=rot)
 
         left = spec["left"]
         world = rig.fk(local)
@@ -469,7 +493,7 @@ class Motion:
             _, local, bend, twist, contact, elbow = best
             self.spread_forearm_twist(local, "l")
             unreal.log_warning("SLASH {}: L (shield) elbow=({:.0f},{:.0f},{:.0f}) wrist_bend={:.0f}deg forearm_twist={:.0f}deg "
-                               "closest to body {:.1f} cm".format(self.setup["stance_name"], elbow[0], elbow[1], elbow[2], bend, twist, -contact))
+                               "closest to body {:.1f} cm".format(label, elbow[0], elbow[1], elbow[2], bend, twist, -contact))
         else:
             shortlist = []
             for roll in range(-180, 180, 15):
@@ -487,10 +511,10 @@ class Motion:
                 if best is None or cost < best[0]:
                     best = (cost, option, roll, trial)
             _, (_, pole_l, bend, twist, miss, elbow), roll, local = best
-            self.stance.update(pole_l=pole_l, roll=float(roll))
+            hold.update(pole_l=pole_l, roll=float(roll))
             unreal.log_warning("SLASH {}: L (grip) roll={}deg elbow=({:.0f},{:.0f},{:.0f}) wrist_bend={:.0f}deg "
-                               "forearm_twist={:.0f}deg miss={:.1f}cm".format(self.setup["stance_name"], roll, elbow[0], elbow[1], elbow[2], bend, twist, miss))
-        self.stance_local = local
+                               "forearm_twist={:.0f}deg miss={:.1f}cm".format(label, roll, elbow[0], elbow[1], elbow[2], bend, twist, miss))
+        return local, hold
 
     def plan(self):
         """Chooses the right elbow direction and hand rotation at every key of the attack."""
@@ -548,6 +572,7 @@ class Motion:
 
     def pose(self, u, left=True, offset=(0.0, 0.0, 0.0), left_pole_override=None):
         """Full local pose at path parameter u (0 .. len(keys)-1). `offset` moves the right wrist target.
+        left_pole_override: (elbow direction, turn around the handle) for a two-handed grip.
         Returns (local, world, info)."""
         rig, keys = self.rig, self.keys
         local = self.body_pose(u)
@@ -562,8 +587,8 @@ class Motion:
         info = dict(twist=twist, bend=self.wrist_bend(world, "r"), left_miss=0.0, left_bend=0.0, left_twist=0.0)
 
         if left and self.two_handed:
-            wrist, hand_rot = self.left_hand_goal(world, catmull(self.key_rolls, u, combine_scalar))
-            pole = left_pole_override or norm(catmull(self.key_poles_l, u, combine_vec))
+            pole, roll = left_pole_override or (norm(catmull(self.key_poles_l, u, combine_vec)), catmull(self.key_rolls, u, combine_scalar))
+            wrist, hand_rot = self.left_hand_goal(world, roll)
             reached, _ = self.arm_l.solve(rig, local, wrist, pole=pole)
             world = rig.fk(local)
             rig.set_world_rot(local, world, "hand_l", hand_rot)
@@ -572,9 +597,15 @@ class Motion:
             info["left_bend"] = self.wrist_bend(world, "l")
             info["left_miss"] = length(sub(reached, wrist))
         elif left:
-            # The shield arm keeps its stance relative to the chest
+            # The shield arm keeps its stance relative to the chest, and swings out of the sword's way during the cut
+            weight = 0.0
+            if self.open_local is not None:
+                weight = max(0.0, min(1.0, catmull(self.setup["open_weights"], u, combine_scalar)))
             for bone in self.arm_bones_l:
-                local[bone] = self.stance_local[bone]
+                pos, rot = self.stance_local[bone]
+                if weight > 0.0:
+                    rot = qnorm(qslerp(rot, self.open_local[bone][1], weight))
+                local[bone] = (pos, rot)
             world = rig.fk(local)
 
         # IK helper bones follow the hands
@@ -617,10 +648,18 @@ class Motion:
         return best
 
     def pick_left_pole(self, u, offset, near):
-        """Left elbow direction for this frame: comfortable, clear of the body, and close to `near`."""
+        """Left elbow direction and turn of the hand around the handle for this frame: comfortable, clear of
+        the body, and close to `near` (the previous frame's (pole, roll), or None)."""
         base_local, base_world, _ = self.pose(u, left=False, offset=offset)
-        roll = catmull(self.key_rolls, u, combine_scalar)
-        options = [(c[0] + (0.6 * angle_between(c[1], near)) ** 2, c[1]) for c in self.left_grip_options(base_local, base_world, roll)]
+        planned = catmull(self.key_rolls, u, combine_scalar)
+        near_pole = near[0] if near else norm(catmull(self.key_poles_l, u, combine_vec))
+        near_roll = near[1] if near else planned
+        options = []
+        for delta in (-30.0, -15.0, 0.0, 15.0, 30.0):
+            roll = planned + delta
+            for c in self.left_grip_options(base_local, base_world, roll):
+                options.append((c[0] + (0.6 * angle_between(c[1], near_pole)) ** 2 + (0.8 * (roll - near_roll)) ** 2 + (0.3 * delta) ** 2,
+                                (c[1], roll)))
         return min(options, key=lambda c: c[0])[1]
 
     def resolved_pose(self, u, offset, previous_left_pole=None):
@@ -629,8 +668,7 @@ class Motion:
         Returns (local, world, info, final offset, left pole)."""
         left_pole = None
         if self.two_handed:
-            near = previous_left_pole or norm(catmull(self.key_poles_l, u, combine_vec))
-            left_pole = self.pick_left_pole(u, offset, near)
+            left_pole = self.pick_left_pole(u, offset, previous_left_pole)
         local, world, info = self.pose(u, offset=offset, left_pole_override=left_pole)
         for _ in range(14):
             depth, direction = self.right_side_push(world)
@@ -833,6 +871,154 @@ def generate(rig, surface, setup, locomotion):
     return failures
 
 
+# ---------------------------------------------------------------- weapons put away
+
+def mount_candidates(place):
+    """Grip frames (origin, rotation, tidiness cost) to try for an item hung on the body, in character space.
+    The rotation's Z is the blade direction (or the shield's up), X the item's thin side / the shield's face."""
+    def frame_from(z, x):
+        z = norm(z)
+        x = norm(reject(x, z))
+        return qfrom_axes(x, cross(z, x), z)
+
+    if place == "hip":
+        # sword at the left hip: hilt up, blade down and back along the leg, hanging a little off the body
+        for x in (24.0, 27.0, 30.0, 33.0, 36.0):
+            for y in (-16.0, -10.0, -4.0, 2.0, 8.0):
+                for z in (94.0, 98.0, 102.0, 106.0):
+                    for tilt in (10.0, 20.0, 30.0, 40.0):
+                        for splay in (0.0, 8.0, 16.0):
+                            t, sp = math.radians(tilt), math.radians(splay)
+                            blade = (math.sin(sp), -math.sin(t) * math.cos(sp), -math.cos(t) * math.cos(sp))
+                            tidy = (2.0 * (x - 24.0)) ** 2 + (0.5 * (tilt - 20.0)) ** 2 + (0.7 * splay) ** 2 + (z - 102.0) ** 2
+                            yield (x, y, z), frame_from(blade, (1.0, 0.0, 0.0)), tidy
+    elif place == "back":
+        # shield on the back, face outward
+        # (the running arms swing their elbows far behind the back at chest height, so low positions are tried too)
+        for z in (98.0, 104.0, 110.0, 116.0, 122.0, 128.0, 134.0, 140.0, 146.0, 152.0, 158.0):
+            for y in (-14.0, -16.0, -18.0, -20.0, -22.0, -24.0, -26.0):
+                for tilt in (-15.0, 0.0, 15.0):
+                    # tilt leans the top of the shield toward (+) or away from (-) the body
+                    t = math.radians(tilt)
+                    up = (0.0, math.sin(t), math.cos(t))
+                    tidy = (3.0 * (abs(y) - 12.0)) ** 2 + (0.5 * (z - 138.0)) ** 2 + (0.5 * tilt) ** 2
+                    yield (0.0, y, z), frame_from(up, (0.0, -1.0, 0.0)), tidy
+    elif place == "back_long":
+        # two-handed sword across the back: hilt over the right shoulder, blade down toward the left
+        for x in (-24.0, -19.0, -14.0, -9.0, -4.0, 0.0):
+            for y in (-13.0, -16.0, -19.0, -22.0):
+                for z in (152.0, 160.0, 168.0, 176.0):
+                    for across in (0.0, 8.0, 16.0, 24.0):
+                        for back in (0.0, 6.0):
+                            a, b = math.radians(across), math.radians(back)
+                            blade = (math.sin(a), -math.sin(b), -math.cos(a) * math.cos(b))
+                            tidy = (3.0 * (abs(y) - 13.0)) ** 2 + (0.5 * (across - 14.0)) ** 2 + (0.3 * (z - 160.0)) ** 2
+                            yield (x, y, z), frame_from(blade, (0.0, -1.0, 0.0)), tidy
+
+
+MOUNT_BONE = {"hip": "pelvis", "back": "spine_04", "back_long": "spine_04"}
+
+
+def place_sheathed(rig, surface, setup, coarse, every_frame):
+    """Finds where each item of the setup sits on the body when put away: close to the body, and clear of
+    it (and of the swinging arms and legs) while standing, walking and running.
+    Candidates are ranked on the `coarse` poses, then the best ones are checked on `every_frame`.
+    Returns ({item: (bone, position, rotation)} in the bone's space, number of penetrations left)."""
+    sheathed = setup["sheathed"]
+    damping = SHEATHED_ARM_DAMPING.get(sheathed["loadout"], 0.0)
+
+    def placed(poses):
+        worlds = [rig.fk(damp_arms(rig, pose, damping)) for pose in poses]
+        return worlds, [surface.place(world) for world in worlds]
+
+    coarse_worlds, coarse_bodies = placed(coarse)
+    worlds, bodies = placed(every_frame)
+
+    def deepest_of(trial, some_worlds, some_bodies):
+        depth, where = -1e9, ""
+        for world, body in zip(some_worlds, some_bodies):
+            capsules, discs = equipment_shapes(world, "_mount", trial)
+            for _, _, segments, radius in capsules:
+                found = deepest_capsule(segments, radius, body)
+                if found[0] > depth:
+                    depth, where = found
+            for _, _, centre, normal, radius, half_thickness in discs:
+                found = deepest_disc(centre, normal, radius, half_thickness, body)
+                if found[0] > depth:
+                    depth, where = found
+        return depth, where
+
+    def cost_of(tidy, depth):
+        return tidy + (40.0 * max(0.0, depth + 1.5)) ** 2
+
+    mounts = {}
+    solved = {}
+    for item, place in sheathed["items"].items():
+        if place in solved:
+            mounts[item] = solved[place]     # the scabbard shares the sword's mount
+            continue
+        bone = MOUNT_BONE[place]
+        bone_pos, bone_rot = rig.idle_world[bone]
+        LOADOUTS["_mount"] = dict(items=[i for i, pl in sheathed["items"].items() if pl == place], two_handed=False)
+        ranked = []
+        for origin, rotation, tidy in mount_candidates(place):
+            local = (bone, qrot(qconj(bone_rot), sub(origin, bone_pos)), qnorm(qmul(qconj(bone_rot), rotation)))
+            trial = {i: local for i in LOADOUTS["_mount"]["items"]}
+            depth, where = deepest_of(trial, coarse_worlds, coarse_bodies)
+            ranked.append((cost_of(tidy, depth), tidy, local, origin))
+            if os.environ.get("SLASH_MOUNT_DEBUG") == place:
+                unreal.log_warning("SLASH mount {} at ({:.0f},{:.0f},{:.0f}) tidy={:.0f}: depth {:.1f} ({})".format(
+                    place, origin[0], origin[1], origin[2], tidy, depth, where))
+        ranked.sort(key=lambda c: c[0])
+        best = None
+        for _, tidy, local, origin in ranked[:40]:
+            trial = {i: local for i in LOADOUTS["_mount"]["items"]}
+            depth, where = deepest_of(trial, worlds, bodies)
+            cost = cost_of(tidy, depth)
+            if best is None or cost < best[0]:
+                best = (cost, local, depth, origin, where)
+        _, local, depth, origin, where = best
+        solved[place] = local
+        mounts[item] = local
+        unreal.log_warning("SLASH sheathed {} on {}: at ({:.0f},{:.0f},{:.0f}), closest to the body over every frame of standing, walking and running {:.1f} cm ({})".format(
+            item, bone, origin[0], origin[1], origin[2], -depth, where))
+    del LOADOUTS["_mount"]
+
+    # Everything together, with the plain locomotion arms
+    worst = {}
+    for world in worlds:
+        for label, (depth, where) in measure(surface, world, sheathed["loadout"], False, mounts).items():
+            if label not in worst or depth > worst[label][0]:
+                worst[label] = (depth, where)
+    bad = [(d, label, where) for label, (d, where) in worst.items() if d > 0.5]
+    for depth, label, where in sorted(bad, reverse=True):
+        unreal.log_warning("SLASH sheathed {}: PENETRATION {:.1f} cm  {} ({})".format(sheathed["loadout"], depth, label, where))
+    if not bad:
+        unreal.log_warning("SLASH sheathed {}: no surface passes through another (closest {:.1f} cm), arm swing damped by {:.0f}%".format(
+            sheathed["loadout"], -max(d for d, _ in worst.values()), damping * 100.0))
+    return mounts, len(bad)
+
+
+def write_mounts(all_mounts):
+    """Tools/mounts.json for the audit, and a C++ header with the same transforms for the game."""
+    tools_dir = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(tools_dir, "mounts.json"), "w") as f:
+        json.dump({item: dict(bone=bone, position=list(pos), rotation=list(rot)) for item, (bone, pos, rot) in all_mounts.items()}, f, indent=2)
+    lines = ["// Generated by Tools/create_attack_anims.py - do not edit by hand.",
+             "// Where each weapon sits on the body when it is put away: its grip frame in the space of a bone.",
+             "", "#pragma once", "", '#include "CoreMinimal.h"', "", "namespace OpenWorldMounts", "{"]
+    for item, (bone, pos, rot) in sorted(all_mounts.items()):
+        name = item[0].upper() + item[1:]
+        lines.append('\tinline const FName {}Bone(TEXT("{}"));'.format(name, bone))
+        lines.append("\tinline const FTransform {}(FQuat({:.6f}, {:.6f}, {:.6f}, {:.6f}), FVector({:.3f}, {:.3f}, {:.3f}));".format(
+            name, rot[0], rot[1], rot[2], rot[3], pos[0], pos[1], pos[2]))
+    lines += ["}", ""]
+    header = os.path.join(tools_dir, "..", "Source", "OpenWorld", "OpenWorldGeneratedMounts.h")
+    with open(header, "w", newline="\n") as f:
+        f.write("\n".join(lines))
+    unreal.log_warning("SLASH wrote mounts for {}".format(", ".join(sorted(all_mounts))))
+
+
 def main():
     rig = Rig()
     surface = BodySurface(rig)
@@ -841,12 +1027,30 @@ def main():
         anim = unreal.load_asset(path)
         for index in range(count):
             locomotion.append(rig.pose_at(anim, anim.get_play_length() * index / count))
+    # The put-away weapons are placed against every frame of the locomotion, the same sampling the audit uses:
+    # a hand or a heel passes a hilt or a blade tip only for a frame or two.
+    every_frame = []
+    for path, _ in LOCOMOTION:
+        anim = unreal.load_asset(path)
+        # the idle pose hardly moves: a few samples are enough there
+        count = 6 if "Idle" in path else max(1, int(round(anim.get_play_length() * 30.0)))
+        for index in range(count + 1):
+            every_frame.append(rig.pose_at(anim, anim.get_play_length() * index / count))
+
     only = os.environ.get("SLASH_ONLY")
+    mounts_only = os.environ.get("SLASH_MOUNTS_ONLY") == "1"
     failures = 0
+    all_mounts = {}
     for key, setup in SETUPS.items():
         if only and key != only:
             continue
-        failures += generate(rig, surface, setup, locomotion)
+        mounts, bad = place_sheathed(rig, surface, setup, locomotion, every_frame)
+        all_mounts.update(mounts)
+        failures += bad
+        if not mounts_only:
+            failures += generate(rig, surface, setup, locomotion)
+    if (not PREVIEW_ONLY or mounts_only) and not only:
+        write_mounts(all_mounts)
     unreal.log_warning("SLASH total penetrations: {}".format(failures))
 
 

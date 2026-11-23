@@ -52,6 +52,10 @@ void FOpenWorldAnimInstanceProxy::PreUpdate(UAnimInstance* InAnimInstance, float
 		Stance = Instance->StanceSequence;
 		PreviousStance = Instance->PreviousStanceSequence;
 		StanceAlpha = Instance->StanceAlpha;
+		StanceArmWeight = Instance->StanceArmWeight;
+		PreviousStanceArmWeight = Instance->PreviousStanceArmWeight;
+		bStanceWholeBody = Instance->bStanceWholeBody;
+		bPreviousStanceWholeBody = Instance->bPreviousStanceWholeBody;
 		StanceRootBones = Instance->StanceRootBones;
 	}
 }
@@ -74,37 +78,45 @@ bool FOpenWorldAnimInstanceProxy::Evaluate_WithRoot(FPoseContext& Output, FAnimN
 
 void FOpenWorldAnimInstanceProxy::ApplyStance(FPoseContext& Output)
 {
+	// The pose goes from what the previous stance made of it to what the current stance makes of it.
+	// A stance acts on the arms by its arm weight, and on the rest of the body only while standing.
 	const bool bBlending = StanceAlpha < 1.f;
-	if (Stance == nullptr && !(bBlending && PreviousStance != nullptr))
+	const bool bHasTo = Stance != nullptr && (StanceArmWeight > 0.f || bStanceWholeBody);
+	const bool bHasFrom = bBlending && PreviousStance != nullptr && (PreviousStanceArmWeight > 0.f || bPreviousStanceWholeBody);
+	if (!bHasTo && !bHasFrom)
 	{
 		return;
 	}
 
-	// The arms go from the previous stance (or the Anim Blueprint's arms) to the current one (or back to the Blueprint's)
 	FPoseContext To(Output);
-	if (Stance != nullptr)
+	if (bHasTo)
 	{
 		SampleSequence(To, Stance, 0.f);
 	}
 	FPoseContext From(Output);
-	if (bBlending && PreviousStance != nullptr)
+	if (bHasFrom)
 	{
 		SampleSequence(From, PreviousStance, 0.f);
 	}
 
 	for (const FCompactPoseBoneIndex BoneIndex : Output.Pose.ForEachBoneIndex())
 	{
-		if (!StanceMask[BoneIndex.GetInt()])
+		const bool bArm = StanceMask[BoneIndex.GetInt()] != 0;
+		const float ToWeight = !bHasTo ? 0.f : (bArm ? StanceArmWeight : (bStanceWholeBody ? LowerBodyWeight : 0.f));
+		const float FromWeight = !bHasFrom ? 0.f : (bArm ? PreviousStanceArmWeight : (bPreviousStanceWholeBody ? LowerBodyWeight : 0.f));
+		if (ToWeight <= KINDA_SMALL_NUMBER && FromWeight <= KINDA_SMALL_NUMBER)
 		{
 			continue;
 		}
 
-		FTransform Target = To.Pose[BoneIndex];
+		const FTransform Source = Output.Pose[BoneIndex];
+		FTransform Result = ToWeight > KINDA_SMALL_NUMBER ? BlendBone(Source, To.Pose[BoneIndex], ToWeight) : Source;
 		if (bBlending)
 		{
-			Target = BlendBone(From.Pose[BoneIndex], To.Pose[BoneIndex], StanceAlpha);
+			const FTransform Start = FromWeight > KINDA_SMALL_NUMBER ? BlendBone(Source, From.Pose[BoneIndex], FromWeight) : Source;
+			Result = BlendBone(Start, Result, StanceAlpha);
 		}
-		Output.Pose[BoneIndex] = Target;
+		Output.Pose[BoneIndex] = Result;
 	}
 }
 
@@ -189,15 +201,20 @@ FAnimInstanceProxy* UOpenWorldAnimInstance::CreateAnimInstanceProxy()
 	return new FOpenWorldAnimInstanceProxy(this);
 }
 
-void UOpenWorldAnimInstance::SetStance(UAnimSequence* Sequence, float BlendTime)
+void UOpenWorldAnimInstance::SetStance(UAnimSequence* Sequence, float BlendTime, float ArmWeight, bool bWholeBodyWhenStanding)
 {
-	if (Sequence == StanceSequence)
+	ArmWeight = FMath::Clamp(ArmWeight, 0.f, 1.f);
+	if (Sequence == StanceSequence && FMath::IsNearlyEqual(ArmWeight, StanceArmWeight) && bWholeBodyWhenStanding == bStanceWholeBody)
 	{
 		return;
 	}
 
 	PreviousStanceSequence = StanceSequence;
+	PreviousStanceArmWeight = StanceArmWeight;
+	bPreviousStanceWholeBody = bStanceWholeBody;
 	StanceSequence = Sequence;
+	StanceArmWeight = ArmWeight;
+	bStanceWholeBody = bWholeBodyWhenStanding;
 	StanceBlendTime = FMath::Max(BlendTime, 0.f);
 	StanceAlpha = StanceBlendTime > 0.f ? 0.f : 1.f;
 }

@@ -3,7 +3,8 @@ Measures interpenetration of the character's body, weapons and shield, the way t
 Project rule: nothing passes through anything (see CLAUDE.md). Depths are in cm; > TOLERANCE is a failure.
 
 For every loadout it checks:
-  - the stance (arms carrying the weapons) layered over standing, walking and running,
+  - the weapons put away on the body (Tools/mounts.json) while standing, walking and running,
+  - the combat stance (arms holding the weapons) layered over standing, walking and running,
   - the attack played by the whole body (standing),
   - the attack played by the upper body over walking and running.
 "unarmed" checks the plain locomotion animations and is a sanity check of the collision model itself.
@@ -15,6 +16,7 @@ Run (Unreal Editor must be closed):
 Set AUDIT_IMAGE=1 to also write Saved/Collision/<mesh>_surface.png (the fitted body surface, front and side).
 Not covered: blends between animations, foot IK, and anything that happens only at runtime.
 """
+import json
 import math
 import os
 import sys
@@ -23,7 +25,7 @@ import unreal
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import owlib  # noqa: E402
-from owlib import BodySurface, Rig, measure  # noqa: E402
+from owlib import SHEATHED_ARM_DAMPING, BodySurface, Rig, damp_arms, measure  # noqa: E402
 
 TOLERANCE = 0.5     # cm; surfaces overlapping less than this count as touching
 SAMPLES_PER_SECOND = 30
@@ -70,12 +72,12 @@ class Audit:
             raise RuntimeError("Missing animation " + path)
         return [(t, self.rig.pose_at(anim, t)) for t in times_of(anim, per_second)]
 
-    def check(self, label, loadout, gripping, poses):
-        """poses: iterable of (description, local pose)."""
+    def check(self, label, loadout, gripping, poses, mounts=None):
+        """poses: iterable of (description, local pose). mounts: items carried on the body."""
         worst = {}
         for description, local in poses:
             world = self.rig.fk(local)
-            for name, (depth, where) in measure(self.surface, world, loadout, gripping).items():
+            for name, (depth, where) in measure(self.surface, world, loadout, gripping, mounts).items():
                 if name not in worst or depth > worst[name][0]:
                     worst[name] = (depth, where, description)
         bad = sorted(((d, n, w, at) for n, (d, w, at) in worst.items() if d > TOLERANCE), reverse=True)
@@ -97,9 +99,18 @@ class Audit:
         for name, poses in locomotion.items():
             self.check("unarmed, " + name, "unarmed", False, (("t={:.2f}s".format(t), local) for t, local in poses))
 
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "mounts.json")) as f:
+            mounts = {item: (m["bone"], tuple(m["position"]), tuple(m["rotation"])) for item, m in json.load(f).items()}
+
         for loadout, (stance_path, attack_path, gripping) in LOADOUT_ANIMS.items():
             stance = self.poses(stance_path)[0][1]
             attack = self.poses(attack_path)
+            # Not in combat: weapons on the body, hands free (arms calmed where the loadout says so)
+            sheathed = loadout + "_sheathed"
+            damping = SHEATHED_ARM_DAMPING.get(sheathed, 0.0)
+            for name, poses in locomotion.items():
+                self.check("{}: put away while {}".format(loadout, name), sheathed, False,
+                           (("t={:.2f}s".format(t), damp_arms(rig, local, damping)) for t, local in poses), mounts)
             for name, poses in locomotion.items():
                 self.check("{}: carried while {}".format(loadout, name), loadout, gripping,
                            (("t={:.2f}s".format(t), layered(local, stance, self.arms)) for t, local in poses))

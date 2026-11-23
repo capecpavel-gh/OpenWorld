@@ -39,9 +39,38 @@ struct FOpenWorldLoadout
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout")
 	TObjectPtr<UStaticMesh> OffHandMesh;
 
-	/** How this equipment is carried: the arms hold this pose while standing, walking and running */
+	/** Combat stance: the arms hold this pose while standing, walking and running; the knees bend while standing */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout")
 	TObjectPtr<UAnimSequence> StanceAnimation;
+
+	/** Scabbard at the hip (stays there, empty, while the weapon is drawn). Null = none. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout|Sheathed")
+	TObjectPtr<UStaticMesh> ScabbardMesh;
+
+	/** Where the right-hand weapon sits when put away: a bone and the weapon's grip frame in that bone's space */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout|Sheathed")
+	FName MainHandSheathBone;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout|Sheathed")
+	FTransform MainHandSheathTransform;
+
+	/** The same for the shield */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout|Sheathed")
+	FName OffHandSheathBone;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout|Sheathed")
+	FTransform OffHandSheathTransform;
+
+	/**
+	 *  With the weapons put away, how far the arms are pulled toward SheathedArmPose (0 = not at all).
+	 *  A big shield on the back leaves less room for the elbows than the plain running animation uses.
+	 *  Must match SHEATHED_ARM_DAMPING in Tools/owlib.py, which the collision audit uses.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout|Sheathed", meta=(ClampMin="0", ClampMax="1"))
+	float SheathedArmDamping = 0.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout|Sheathed")
+	TObjectPtr<UAnimSequence> SheathedArmPose;
 
 	/** Attack animation, played over the upper body (and the whole body while standing). Starts and ends in the stance. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout")
@@ -115,6 +144,10 @@ class AOpenWorldCharacter : public ACharacter
 	/** Shield held in the left hand */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Components", meta = (AllowPrivateAccess = "true"))
 	UStaticMeshComponent* OffHandWeapon;
+
+	/** Scabbard at the hip */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Components", meta = (AllowPrivateAccess = "true"))
+	UStaticMeshComponent* Scabbard;
 
 	/** Follow camera */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Components", meta = (AllowPrivateAccess = "true"))
@@ -221,6 +254,14 @@ protected:
 	/** Turn the character to the camera direction when an attack starts while standing */
 	UPROPERTY(EditAnywhere, Category="Combat|Attack")
 	bool bFaceCameraOnAttack = true;
+
+	/** The weapons are put away this long after the last press of the attack button */
+	UPROPERTY(EditAnywhere, Category="Combat|Weapon", meta=(ClampMin="0", Units="s"))
+	float CombatTimeout = 15.f;
+
+	/** How long the arms take to move between carrying nothing and the combat stance */
+	UPROPERTY(EditAnywhere, Category="Combat|Weapon", meta=(ClampMin="0", Units="s"))
+	float StanceBlendTime = 0.3f;
 
 	/** A click this long before the combo window still continues the combo */
 	UPROPERTY(EditAnywhere, Category="Combat|Attack", meta=(ClampMin="0", Units="s"))
@@ -334,6 +375,13 @@ private:
 
 	/** Attack state */
 	int32 CurrentLoadoutIndex = INDEX_NONE;
+
+	/** Weapons in the hands (combat) or on the body (not in combat) */
+	bool bWeaponsDrawn = false;
+	float LastCombatInputTime = -1000.f;
+
+	/** Attaches weapons, shield and scabbard to hands or body and sets the arms' stance for the current state */
+	void ApplyWeaponState();
 	bool bIsAttacking = false;
 	float CachedAttackInputTime = -1000.f;
 
@@ -367,6 +415,17 @@ public:
 	/** Equips the loadout with this index */
 	UFUNCTION(BlueprintCallable, Category="Combat")
 	void EquipLoadout(int32 Index);
+
+	/** Takes the weapons into the hands and goes into the combat stance */
+	UFUNCTION(BlueprintCallable, Category="Combat")
+	void DrawWeapons();
+
+	/** Puts the weapons away: sword into the scabbard, shield or two-handed sword on the back */
+	UFUNCTION(BlueprintCallable, Category="Combat")
+	void SheatheWeapons();
+
+	UFUNCTION(BlueprintPure, Category="Combat")
+	bool AreWeaponsDrawn() const { return bWeaponsDrawn; }
 
 	/** Equips the next loadout in the list */
 	UFUNCTION(BlueprintCallable, Category="Combat")

@@ -459,23 +459,56 @@ EQUIPMENT = {
         dict(kind="disc", name="shield", offset=8.6, radius=31.6, half_thickness=1.4),
     ]),
 }
+# The scabbard hangs at the hip with the sword in it: it uses the sword's mount and covers the blade
+EQUIPMENT["scabbard"] = dict(hand="l", parts=[
+    dict(kind="blade", name="scabbard", z0=7.0, z1=91.0, half_width=3.4, half_thickness=1.4),
+])
 LOADOUTS = {
     "sword_shield": dict(items=["sword", "shield"], two_handed=False),
     "greatsword": dict(items=["greatsword"], two_handed=True),
     "unarmed": dict(items=[], two_handed=False),
+    # weapons put away: every item sits on a mount on the body (see `mounts` in equipment_shapes)
+    "sword_shield_sheathed": dict(items=["sword", "scabbard", "shield"], two_handed=False),
+    "greatsword_sheathed": dict(items=["greatsword"], two_handed=False),
 }
 
 
-def equipment_shapes(world, loadout):
-    """World-space shapes of everything the character holds: (name, hand side, [segments], radius) for
-    capsule-like parts and (name, hand side, centre, normal, radius, half_thickness) for discs."""
+# With a big shield on the back the arms can not swing as far behind the body as the plain running
+# animation does. In that state the game pulls the arms this far (0..1) toward their idle pose.
+SHEATHED_ARM_DAMPING = {"sword_shield_sheathed": 0.5, "greatsword_sheathed": 0.0}
+ARM_ROOTS = {"upperarm_l", "upperarm_r"}
+
+
+def damp_arms(rig, pose, amount):
+    """The pose with both arms pulled `amount` (0..1) of the way toward the idle pose."""
+    if amount <= 0.0:
+        return pose
+    out = dict(pose)
+    for bone in rig.bones:
+        if rig.ancestor_in(bone, ARM_ROOTS):
+            out[bone] = (pose[bone][0], qnorm(qslerp(pose[bone][1], rig.base[bone][1], amount)))
+    return out
+
+
+def equipment_shapes(world, loadout, mounts=None):
+    """World-space shapes of everything the character carries: (name, hand side, [segments], radius) for
+    capsule-like parts and (name, hand side, centre, normal, radius, half_thickness) for discs.
+    mounts: {item: (bone, position, rotation)} puts an item on the body instead of in its hand; position
+    and rotation are the item's grip frame in that bone's space. The hand side of a mounted item is ""."""
     capsules, discs = [], []
     for item in LOADOUTS[loadout]["items"]:
         spec = EQUIPMENT[item]
-        side = spec["hand"]
-        pos, rot = world["hand_" + side]
-        socket = qmul(rot, SOCKET_ROT[side])
-        origin = add(pos, qrot(rot, GRIP_OFFSET[side]))
+        if mounts and item in mounts:
+            bone, local_pos, local_rot = mounts[item]
+            pos, rot = world[bone]
+            side = ""
+            socket = qnorm(qmul(rot, local_rot))
+            origin = add(pos, qrot(rot, local_pos))
+        else:
+            side = spec["hand"]
+            pos, rot = world["hand_" + side]
+            socket = qmul(rot, SOCKET_ROT[side])
+            origin = add(pos, qrot(rot, GRIP_OFFSET[side]))
         x, y, z = qrot(socket, (1.0, 0.0, 0.0)), qrot(socket, (0.0, 1.0, 0.0)), qrot(socket, (0.0, 0.0, 1.0))
         for part in spec["parts"]:
             if part["kind"] == "blade":
@@ -538,9 +571,10 @@ def deepest_disc(centre, normal, radius, half_thickness, spheres):
     return best
 
 
-def measure(surface, world, loadout="unarmed", gripping=False):
+def measure(surface, world, loadout="unarmed", gripping=False, mounts=None):
     """All surface-vs-surface checks for one pose. Returns {label: (depth cm, where)}; depth > 0 is a penetration.
-    gripping=True: both hands hold the same weapon, so the hands (and the weapon near them) may touch."""
+    gripping=True: both hands hold the same weapon, so the hands (and the weapon near them) may touch.
+    mounts: items carried on the body instead of in the hands (see equipment_shapes)."""
     def spheres(bones):
         return surface.place(world, bones)
 
@@ -563,9 +597,9 @@ def measure(surface, world, loadout="unarmed", gripping=False):
     depth, a, b = deepest(spheres(["lowerarm_r"] + ([] if gripping else ["hand_r"])), spheres(["upperarm_l"]))
     result["forearm_r vs upperarm_l"] = (depth, a + "/" + b)
 
-    capsules, discs = equipment_shapes(world, loadout)
+    capsules, discs = equipment_shapes(world, loadout, mounts)
     for name, side, segments, radius in capsules:
-        holding = ["hand_" + side] + (["hand_l", "hand_r"] if gripping else [])
+        holding = (["hand_" + side] if side else []) + (["hand_l", "hand_r"] if gripping else [])
         body = spheres([b for b in MAJOR_BONES if b not in holding])
         depth, where = deepest_capsule(segments, radius, body)
         result[name + " vs body"] = (depth, where)
@@ -580,6 +614,7 @@ def measure(surface, world, loadout="unarmed", gripping=False):
                 for k in range(11):
                     worst = max(worst, other_radius - point_disc_distance(lerp(a, b, k / 10.0), centre, normal, radius, half_thickness))
             result[other + " vs " + name] = (worst, "")
+    # Weapons are not checked against each other except against shields: a sheathed sword is inside its scabbard
     return result
 
 

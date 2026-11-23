@@ -3,6 +3,7 @@ Builds the weapon Static Mesh assets and their materials:
   /Game/Weapons/Sword/SM_Sword            one-handed sword
   /Game/Weapons/Greatsword/SM_Greatsword  two-handed sword
   /Game/Weapons/Shield/SM_Shield          round centre-grip shield
+  /Game/Weapons/Sword/SM_Scabbard         scabbard of the one-handed sword
 
 Steel and wood come from create_materials.py (run it first): textured materials plus the physical
 materials that give each mesh its substance (hardness, density) for contacts.
@@ -14,6 +15,7 @@ Run (Unreal Editor must be closed):
 Mesh axes match the HandGrip_R / HandGrip_L sockets of the mannequin:
   Swords: +Z = blade direction, Y = blade width (edges), X = blade thickness.
           The origin is where the right hand holds the grip.
+  Scabbard: built in the sword's own space, so it is attached exactly where the sheathed sword is.
   Shield: +X = outward face (back of the left hand), +Z = up (thumb side), origin = centre of the handle.
 """
 import unreal
@@ -39,6 +41,12 @@ SWORDS = {
 SWORD_SLOTS = [SUBSTANCE_DIR + "/MI_Steel", SUBSTANCE_DIR + "/MI_SteelDark", "MI_Sword_Grip"]
 SWORD_SUBSTANCE = SUBSTANCE_DIR + "/PM_Steel"
 BLADE, GUARD, GRIP = 0, 1, 2
+
+# The scabbard covers the blade of the one-handed sword: from just above the guard's top to past the tip
+SCABBARD_PATH = "/Game/Weapons/Sword/SM_Scabbard"
+SCABBARD = dict(start=8.6, end=90.5, half_width=3.3, thickness=2.4, fitting_length=4.5, fitting_extra=0.35)
+# leather body with steel fittings at the mouth and the tip
+SCABBARD_SLOTS = ["MI_Sword_Grip", SUBSTANCE_DIR + "/MI_SteelDark"]
 
 SHIELD_PATH = "/Game/Weapons/Shield/SM_Shield"
 # plate_offset: the plate starts this far in front of the grip, so the forearm lies behind it without touching (arm-strap shield)
@@ -147,6 +155,21 @@ def build_sword(d):
     return mesh
 
 
+def build_scabbard(d):
+    mesh = unreal.new_object(unreal.DynamicMesh)
+    length = d["end"] - d["start"]
+    # leather body
+    prims.append_box(mesh, options(0), transform(z=d["start"]), dimension_x=d["thickness"], dimension_y=2.0 * d["half_width"],
+                     dimension_z=length, steps_x=0, steps_y=0, steps_z=0, origin=BASE)
+    # steel throat at the mouth and chape at the tip, a little wider than the body
+    extra = 2.0 * d["fitting_extra"]
+    for z in (d["start"], d["end"] - d["fitting_length"] + 0.3):
+        prims.append_box(mesh, options(1), transform(z=z), dimension_x=d["thickness"] + extra,
+                         dimension_y=2.0 * d["half_width"] + extra, dimension_z=d["fitting_length"],
+                         steps_x=0, steps_y=0, steps_z=0, origin=BASE)
+    return mesh
+
+
 def build_shield(d):
     mesh = unreal.new_object(unreal.DynamicMesh)
     facing_out = unreal.MathLibrary.make_rot_from_z(unreal.Vector(1, 0, 0))   # cylinder axis along +X
@@ -240,6 +263,8 @@ def main():
     for path, dimensions in SWORDS.items():
         save_static_mesh(build_sword(dimensions), path, resolve(SWORD_SLOTS),
                          unreal.GeometryScriptCollisionGenerationMethod.ORIENTED_BOXES, steel)
+    save_static_mesh(build_scabbard(SCABBARD), SCABBARD_PATH, resolve(SCABBARD_SLOTS),
+                     unreal.GeometryScriptCollisionGenerationMethod.ORIENTED_BOXES, wood)
     save_static_mesh(build_shield(SHIELD), SHIELD_PATH, resolve(SHIELD_SLOTS),
                      unreal.GeometryScriptCollisionGenerationMethod.CONVEX_HULLS, wood)
 
