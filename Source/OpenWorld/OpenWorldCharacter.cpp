@@ -14,6 +14,11 @@
 #include "InputMappingContext.h"
 #include "InputCoreTypes.h"
 #include "GameFramework/PlayerController.h"
+#include "Components/StaticMeshComponent.h"
+#include "Animation/AnimMontage.h"
+#include "Engine/StaticMesh.h"
+#include "UObject/ConstructorHelpers.h"
+#include "CombatDamageable.h"
 #include "OpenWorld.h"
 
 AOpenWorldCharacter::AOpenWorldCharacter()
@@ -55,6 +60,27 @@ AOpenWorldCharacter::AOpenWorldCharacter()
 
 	// Needed for smooth zoom and "both buttons = walk forward"
 	PrimaryActorTick.bCanEverTick = true;
+
+	// Sword in the right hand. The mesh is built so that its grip sits in the HandGrip_R socket.
+	Weapon = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Weapon"));
+	Weapon->SetupAttachment(GetMesh(), WeaponSocketName);
+	Weapon->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	Weapon->SetGenerateOverlapEvents(false);
+	Weapon->CanCharacterStepUpOn = ECB_No;
+
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> SwordMesh(TEXT("/Game/Weapons/Sword/SM_Sword.SM_Sword"));
+	if (SwordMesh.Succeeded())
+	{
+		Weapon->SetStaticMesh(SwordMesh.Object);
+	}
+
+	static ConstructorHelpers::FObjectFinder<UAnimMontage> ComboMontage(TEXT("/Game/Variant_Combat/Anims/AM_ComboAttack.AM_ComboAttack"));
+	if (ComboMontage.Succeeded())
+	{
+		AttackMontage = ComboMontage.Object;
+	}
+
+	OnAttackMontageEnded.BindUObject(this, &AOpenWorldCharacter::AttackMontageEnded);
 }
 
 void AOpenWorldCharacter::BeginPlay()
@@ -62,6 +88,20 @@ void AOpenWorldCharacter::BeginPlay()
 	Super::BeginPlay();
 
 	DefaultRotationRateYaw = GetCharacterMovement()->RotationRate.Yaw;
+	DefaultWalkSpeed = GetCharacterMovement()->MaxWalkSpeed;
+
+	// Re-attach in case the socket name was changed in the Blueprint
+	Weapon->AttachToComponent(GetMesh(), FAttachmentTransformRules::KeepRelativeTransform, WeaponSocketName);
+
+	// Every section of the attack montage is one hit of the combo, in order
+	ComboSectionNames.Reset();
+	if (AttackMontage)
+	{
+		for (const FCompositeSection& Section : AttackMontage->CompositeSections)
+		{
+			ComboSectionNames.Add(Section.SectionName);
+		}
+	}
 
 	// Start from the arm length set in the Blueprint, within the zoom limits
 	SetZoomDistance(CameraBoom->TargetArmLength, true);
@@ -118,12 +158,19 @@ void AOpenWorldCharacter::SetupCameraInput()
 		CameraOrbitAction->ValueType = EInputActionValueType::Boolean;
 	}
 
+	if (!SprintAction)
+	{
+		SprintAction = NewObject<UInputAction>(this, TEXT("IA_Sprint_Runtime"));
+		SprintAction->ValueType = EInputActionValueType::Boolean;
+	}
+
 	if (!CameraMappingContext)
 	{
 		CameraMappingContext = NewObject<UInputMappingContext>(this, TEXT("IMC_Camera_Runtime"));
 		CameraMappingContext->MapKey(CameraZoomAction, EKeys::MouseWheelAxis);
 		CameraMappingContext->MapKey(CameraRotateAction, EKeys::RightMouseButton);
 		CameraMappingContext->MapKey(CameraOrbitAction, EKeys::LeftMouseButton);
+		CameraMappingContext->MapKey(SprintAction, EKeys::LeftShift);
 	}
 
 	if (const APlayerController* PC = Cast<APlayerController>(GetController()))
@@ -143,6 +190,13 @@ void AOpenWorldCharacter::MouseLook(const FInputActionValue& Value)
 	// The mouse only moves the camera while a camera button is held; otherwise it moves the cursor
 	if (IsCameraControlActive())
 	{
+		if (bCameraOrbiting)
+		{
+			// Track how far the mouse moved, to tell a click from a camera drag
+			const FVector2D Delta = Value.Get<FVector2D>();
+			OrbitMouseTravel += FMath::Abs(Delta.X) + FMath::Abs(Delta.Y);
+		}
+
 		Look(Value);
 	}
 }
@@ -168,6 +222,8 @@ void AOpenWorldCharacter::CameraRotateCompleted()
 void AOpenWorldCharacter::CameraOrbitStarted()
 {
 	bCameraOrbiting = true;
+	OrbitPressTime = GetWorld()->GetTimeSeconds();
+	OrbitMouseTravel = 0.f;
 	UpdateRotationMode();
 }
 
@@ -175,6 +231,143 @@ void AOpenWorldCharacter::CameraOrbitCompleted()
 {
 	bCameraOrbiting = false;
 	UpdateRotationMode();
+
+	// A short left click without dragging the camera is an attack
+	const float HeldTime = GetWorld()->GetTimeSeconds() - OrbitPressTime;
+	if (HeldTime <= AttackClickMaxDuration && OrbitMouseTravel <= AttackClickMaxMouseTravel)
+	{
+		Attack();
+	}
+}
+
+void AOpenWorldCharacter::SprintStarted()
+{
+	GetCharacterMovement()->MaxWalkSpeed = SprintSpeed;
+}
+
+void AOpenWorldCharacter::SprintCompleted()
+{
+	GetCharacterMovement()->MaxWalkSpeed = DefaultWalkSpeed;
+}
+
+void AOpenWorldCharacter::Attack()
+{
+	if (!AttackMontage)
+	{
+		UE_LOG(LogOpenWorld, Warning, TEXT("'%s' has no AttackMontage set."), *GetNameSafe(this));
+		return;
+	}
+
+	if (bIsAttacking)
+	{
+		// Remember the click; CheckCombo (from the montage) or the montage end will use it
+		CachedAttackInputTime = GetWorld()->GetTimeSeconds();
+		return;
+	}
+
+	PlayAttackMontage();
+}
+
+void AOpenWorldCharacter::PlayAttackMontage()
+{
+	UAnimInstance* AnimInstance = GetMesh()->GetAnimInstance();
+	if (!AnimInstance)
+	{
+		return;
+	}
+
+	if (bFaceCameraOnAttack && GetController())
+	{
+		SetActorRotation(FRotator(0.f, GetController()->GetControlRotation().Yaw, 0.f));
+	}
+
+	ComboCount = 0;
+	CachedAttackInputTime = -1000.f;
+
+	if (AnimInstance->Montage_Play(AttackMontage, 1.0f, EMontagePlayReturnType::MontageLength, 0.0f, true) > 0.f)
+	{
+		bIsAttacking = true;
+		AnimInstance->Montage_SetEndDelegate(OnAttackMontageEnded, AttackMontage);
+	}
+}
+
+void AOpenWorldCharacter::AttackMontageEnded(UAnimMontage* Montage, bool bInterrupted)
+{
+	bIsAttacking = false;
+
+	// Clicked right at the end of the combo: start a new one
+	if (!bInterrupted && GetWorld()->GetTimeSeconds() - CachedAttackInputTime <= ComboInputCacheTime)
+	{
+		PlayAttackMontage();
+	}
+}
+
+void AOpenWorldCharacter::CheckCombo()
+{
+	if (!bIsAttacking || GetWorld()->GetTimeSeconds() - CachedAttackInputTime > ComboInputCacheTime)
+	{
+		return;
+	}
+
+	// Consume the click and continue with the next hit of the combo
+	CachedAttackInputTime = -1000.f;
+	++ComboCount;
+
+	if (ComboSectionNames.IsValidIndex(ComboCount))
+	{
+		if (bFaceCameraOnAttack && GetController())
+		{
+			SetActorRotation(FRotator(0.f, GetController()->GetControlRotation().Yaw, 0.f));
+		}
+
+		if (UAnimInstance* AnimInstance = GetMesh()->GetAnimInstance())
+		{
+			AnimInstance->Montage_JumpToSection(ComboSectionNames[ComboCount], AttackMontage);
+		}
+	}
+}
+
+void AOpenWorldCharacter::DoAttackTrace(FName DamageSourceBone)
+{
+	// Sweep forward from the character's chest, covering the sword's reach
+	const FVector TraceStart = GetActorLocation();
+	const FVector TraceEnd = TraceStart + GetActorForwardVector() * MeleeTraceDistance;
+
+	FCollisionObjectQueryParams ObjectParams;
+	ObjectParams.AddObjectTypesToQuery(ECC_Pawn);
+	ObjectParams.AddObjectTypesToQuery(ECC_WorldDynamic);
+
+	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(OpenWorldMeleeTrace), false, this);
+
+	TArray<FHitResult> Hits;
+	if (!GetWorld()->SweepMultiByObjectType(Hits, TraceStart, TraceEnd, FQuat::Identity, ObjectParams,
+		FCollisionShape::MakeSphere(MeleeTraceRadius), QueryParams))
+	{
+		return;
+	}
+
+	TSet<AActor*> AlreadyHit;
+	for (const FHitResult& Hit : Hits)
+	{
+		AActor* HitActor = Hit.GetActor();
+		if (!HitActor || AlreadyHit.Contains(HitActor))
+		{
+			continue;
+		}
+		AlreadyHit.Add(HitActor);
+
+		const FVector Impulse = GetActorForwardVector() * MeleeKnockbackImpulse;
+
+		if (ICombatDamageable* Damageable = Cast<ICombatDamageable>(HitActor))
+		{
+			Damageable->ApplyDamage(MeleeDamage, this, Hit.ImpactPoint, Impulse);
+		}
+		else if (UPrimitiveComponent* HitComponent = Hit.GetComponent(); HitComponent && HitComponent->IsSimulatingPhysics())
+		{
+			// Push loose physics objects (boxes, barrels...)
+			HitComponent->AddImpulseAtLocation(Impulse * HitComponent->GetMass() * 0.01f, Hit.ImpactPoint);
+		}
+	}
 }
 
 void AOpenWorldCharacter::UpdateRotationMode()
@@ -212,6 +405,10 @@ void AOpenWorldCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInput
 		EnhancedInputComponent->BindAction(CameraRotateAction, ETriggerEvent::Completed, this, &AOpenWorldCharacter::CameraRotateCompleted);
 		EnhancedInputComponent->BindAction(CameraOrbitAction, ETriggerEvent::Started, this, &AOpenWorldCharacter::CameraOrbitStarted);
 		EnhancedInputComponent->BindAction(CameraOrbitAction, ETriggerEvent::Completed, this, &AOpenWorldCharacter::CameraOrbitCompleted);
+
+		// Sprint while Left Shift is held
+		EnhancedInputComponent->BindAction(SprintAction, ETriggerEvent::Started, this, &AOpenWorldCharacter::SprintStarted);
+		EnhancedInputComponent->BindAction(SprintAction, ETriggerEvent::Completed, this, &AOpenWorldCharacter::SprintCompleted);
 	}
 	else
 	{
