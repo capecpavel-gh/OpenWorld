@@ -5,26 +5,72 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Character.h"
 #include "Logging/LogMacros.h"
-#include "Animation/AnimInstance.h"
-#include "CombatAttacker.h"
 #include "OpenWorldCharacter.generated.h"
 
 class USpringArmComponent;
 class UCameraComponent;
 class UStaticMeshComponent;
+class UStaticMesh;
 class UInputAction;
 class UInputMappingContext;
-class UAnimMontage;
+class UAnimSequence;
+class UOpenWorldAnimInstance;
 struct FInputActionValue;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogTemplateCharacter, Log, All);
+
+/** A set of equipment the character can switch to, with its attack */
+USTRUCT(BlueprintType)
+struct FOpenWorldLoadout
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout")
+	FText DisplayName;
+
+	/** Weapon in the right hand */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout")
+	TObjectPtr<UStaticMesh> MainHandMesh;
+
+	/** Shield (or nothing) in the left hand */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout")
+	TObjectPtr<UStaticMesh> OffHandMesh;
+
+	/** Attack animation, played over the upper body (and the whole body while standing) */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout")
+	TObjectPtr<UAnimSequence> AttackAnimation;
+
+	/** Time in the attack animation when the hit is checked */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout", meta=(ClampMin="0", Units="s"))
+	float HitTime = 0.38f;
+
+	/** From this time on a queued click chains straight into the next attack */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout", meta=(ClampMin="0", Units="s"))
+	float ComboTime = 0.66f;
+
+	/** Reach of the hit check */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout", meta=(ClampMin="0", Units="cm"))
+	float TraceDistance = 110.f;
+
+	/** Radius of the hit check */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout", meta=(ClampMin="0", Units="cm"))
+	float TraceRadius = 45.f;
+
+	/** Damage dealt per hit */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout", meta=(ClampMin="0"))
+	float Damage = 1.f;
+
+	/** Knockback applied to hit targets */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout", meta=(ClampMin="0"))
+	float KnockbackImpulse = 250.f;
+};
 
 /**
  *  A simple player-controllable third person character
  *  Implements a controllable orbiting camera
  */
 UCLASS(abstract)
-class AOpenWorldCharacter : public ACharacter, public ICombatAttacker
+class AOpenWorldCharacter : public ACharacter
 {
 	GENERATED_BODY()
 
@@ -35,6 +81,10 @@ class AOpenWorldCharacter : public ACharacter, public ICombatAttacker
 	/** Weapon held in the right hand */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Components", meta = (AllowPrivateAccess = "true"))
 	UStaticMeshComponent* Weapon;
+
+	/** Shield held in the left hand */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Components", meta = (AllowPrivateAccess = "true"))
+	UStaticMeshComponent* OffHandWeapon;
 
 	/** Follow camera */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Components", meta = (AllowPrivateAccess = "true"))
@@ -110,13 +160,25 @@ protected:
 	UPROPERTY(EditAnywhere, Category="Movement|Sprint", meta=(ClampMin="0", Units="cm/s"))
 	float SprintSpeed = 850.f;
 
-	/** Socket on the character mesh the weapon is attached to */
+	/** Switch to the next loadout (click of the mouse wheel). Created at runtime if left empty. */
+	UPROPERTY(EditAnywhere, Category="Input|Combat")
+	TObjectPtr<UInputAction> SwitchLoadoutAction;
+
+	/** Socket on the character mesh the right-hand weapon is attached to */
 	UPROPERTY(EditAnywhere, Category="Combat|Weapon")
 	FName WeaponSocketName = TEXT("HandGrip_R");
 
-	/** Attack animation montage; each montage section is one hit of the combo */
-	UPROPERTY(EditAnywhere, Category="Combat|Attack")
-	TObjectPtr<UAnimMontage> AttackMontage;
+	/** Socket on the character mesh the left-hand shield is attached to */
+	UPROPERTY(EditAnywhere, Category="Combat|Weapon")
+	FName OffHandSocketName = TEXT("HandGrip_L");
+
+	/** Equipment sets; the mouse wheel click cycles through them */
+	UPROPERTY(EditAnywhere, Category="Combat|Weapon")
+	TArray<FOpenWorldLoadout> Loadouts;
+
+	/** Loadout equipped when the game starts */
+	UPROPERTY(EditAnywhere, Category="Combat|Weapon", meta=(ClampMin="0"))
+	int32 StartingLoadoutIndex = 0;
 
 	/** A left button press shorter than this counts as an attack click instead of a camera drag */
 	UPROPERTY(EditAnywhere, Category="Combat|Attack", meta=(ClampMin="0", Units="s"))
@@ -126,33 +188,13 @@ protected:
 	UPROPERTY(EditAnywhere, Category="Combat|Attack", meta=(ClampMin="0"))
 	float AttackClickMaxMouseTravel = 10.f;
 
-	/** Turn the character to the camera direction when an attack starts */
+	/** Turn the character to the camera direction when an attack starts while standing */
 	UPROPERTY(EditAnywhere, Category="Combat|Attack")
 	bool bFaceCameraOnAttack = true;
-
-	/** Ignore movement input while the attack animation plays (it is a full-body animation with planted feet) */
-	UPROPERTY(EditAnywhere, Category="Combat|Attack")
-	bool bLockMovementWhileAttacking = true;
 
 	/** A click this long before the combo window still continues the combo */
 	UPROPERTY(EditAnywhere, Category="Combat|Attack", meta=(ClampMin="0", Units="s"))
 	float ComboInputCacheTime = 0.45f;
-
-	/** Reach of the attack hit check */
-	UPROPERTY(EditAnywhere, Category="Combat|Attack", meta=(ClampMin="0", Units="cm"))
-	float MeleeTraceDistance = 110.f;
-
-	/** Radius of the attack hit check */
-	UPROPERTY(EditAnywhere, Category="Combat|Attack", meta=(ClampMin="0", Units="cm"))
-	float MeleeTraceRadius = 45.f;
-
-	/** Damage dealt per hit */
-	UPROPERTY(EditAnywhere, Category="Combat|Attack", meta=(ClampMin="0"))
-	float MeleeDamage = 1.f;
-
-	/** Knockback applied to hit targets */
-	UPROPERTY(EditAnywhere, Category="Combat|Attack", meta=(ClampMin="0"))
-	float MeleeKnockbackImpulse = 250.f;
 
 public:
 
@@ -187,15 +229,17 @@ protected:
 	void SprintStarted();
 	void SprintCompleted();
 
-	/** Starts the attack combo, or queues the next hit if already attacking */
+	/** Starts an attack, or queues the next one if already attacking */
 	void Attack();
-	void PlayAttackMontage();
-	void AttackMontageEnded(UAnimMontage* Montage, bool bInterrupted);
+	void StartAttack();
 
-	// ICombatAttacker (called from the attack montage's AnimNotifies)
-	virtual void DoAttackTrace(FName DamageSourceBone) override;
-	virtual void CheckCombo() override;
-	virtual void CheckChargedAttack() override {}
+	/** Advances the running attack: hit check, combo chaining, end */
+	void UpdateAttack();
+
+	/** Sweeps in front of the character and damages / pushes what the weapon hits */
+	void DoAttackTrace(const FOpenWorldLoadout& Loadout);
+
+	UOpenWorldAnimInstance* GetOverlayAnimInstance() const;
 
 private:
 
@@ -209,21 +253,43 @@ private:
 	float OrbitPressTime = 0.f;
 	float OrbitMouseTravel = 0.f;
 
-	/** Combo state */
+	/** Attack state */
+	int32 CurrentLoadoutIndex = INDEX_NONE;
 	bool bIsAttacking = false;
-	int32 ComboCount = 0;
+	bool bHitChecked = false;
 	float CachedAttackInputTime = -1000.f;
-	TArray<FName> ComboSectionNames;
-	FOnMontageEnded OnAttackMontageEnded;
+
+#if !UE_BUILD_SHIPPING
+	/** Scripted run started with -OWSelfTest on the command line; logs what the attacks do */
+	void TickSelfTest(float DeltaSeconds);
+	bool bSelfTest = false;
+	float SelfTestTime = 0.f;
+	float SelfTestNextLog = 0.f;
+	int32 SelfTestStep = 0;
+#endif
 
 public:
 
-	/** True while the attack montage is playing */
+	/** True while an attack animation is playing */
 	UFUNCTION(BlueprintPure, Category="Combat")
 	bool IsAttacking() const { return bIsAttacking; }
 
-	/** Returns the weapon component */
+	/** Equips the loadout with this index */
+	UFUNCTION(BlueprintCallable, Category="Combat")
+	void EquipLoadout(int32 Index);
+
+	/** Equips the next loadout in the list */
+	UFUNCTION(BlueprintCallable, Category="Combat")
+	void EquipNextLoadout();
+
+	UFUNCTION(BlueprintPure, Category="Combat")
+	int32 GetCurrentLoadoutIndex() const { return CurrentLoadoutIndex; }
+
+	/** Returns the right-hand weapon component */
 	FORCEINLINE UStaticMeshComponent* GetWeapon() const { return Weapon; }
+
+	/** Returns the left-hand shield component */
+	FORCEINLINE UStaticMeshComponent* GetOffHandWeapon() const { return OffHandWeapon; }
 
 public:
 
