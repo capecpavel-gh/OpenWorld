@@ -17,13 +17,19 @@ Quinn má jiné proporce než výchozí Manny, i když sdílejí kostru. Všechn
 | otáčení kolečka | zoom kamery |
 | držení pravého tlačítka | otáčí kamerou i postavou |
 | držení levého tlačítka | kamera obíhá kolem postavy |
-| krátké kliknutí levým | útok podle aktuální sestavy |
+| krátké kliknutí levým | se zbraněmi na těle je tasí, se zbraněmi v rukou útočí |
 | stisk kolečka | přepnutí sestavy zbraní |
 | levý Shift | sprint |
 
+Kliknutí od tažení kamery se rozlišuje délkou stisku (do 0,25 s) a pohybem myši. Po 15 s bez kliknutí
+se zbraně samy vrátí na tělo.
+
 **Sestavy zbraní** (`FOpenWorldLoadout` v `OpenWorldCharacter.h`): meč + štít, obouruční meč.
-Každá má model do pravé a levé ruky, držení (stance), animaci útoku, okno zásahu, rozměry čepele,
-hmotnost a látku, ze které je čepel.
+Každá má model do pravé a levé ruky, pochvu, polohy zbraní na těle, bojový střeh (stance), animaci
+útoku, okno zásahu, rozměry čepele, hmotnost a látku, ze které je čepel.
+
+**Dva stavy zbraní:** nebojový (zbraně na těle, ruce volné) a bojový (zbraně v rukou, bojový střeh).
+Podrobně v sekci „Fyzika ve hře“.
 
 **Látky.** Všechno pevné je z nějaké látky (`UOpenWorldPhysicalMaterial`): tření, pružnost a hustota
 z enginu plus tvrdost a houževnatost. Zatím existuje ocel (tvrdost 7,5) a dřevo (2,5). Látku nese
@@ -41,14 +47,16 @@ Herní režim (`OpenWorldGameMode`) staví před start hráče řadu zkušebníc
 
 **Animace se skládají ve třech vrstvách** (`OpenWorldAnimInstance`, rodič animačního Blueprintu `ABP_Unarmed`):
 1. pohyb z animačního Blueprintu (stání, chůze, běh, skok),
-2. držení zbraní na obou pažích, pořád,
+2. střeh: v bojovém stavu drží paže zbraně pořád a ve stoje se přidá pokrčení kolen a předklon;
+   v nebojovém stavu se štítem na zádech jen tlumí švih paží,
 3. útok: horní polovina těla vždy, nohy jen když postava stojí. Proto útok nezastavuje běh.
 
 **Kde co je**
 
 | Cesta | Obsah |
 |---|---|
-| `Source/OpenWorld/OpenWorldCharacter.*` | kamera, vstupy, sprint, sestavy, útok, střet čepele, test ve hře |
+| `Source/OpenWorld/OpenWorldCharacter.*` | kamera, vstupy, sprint, sestavy, stavy zbraní, útok, střet čepele, test ve hře |
+| `Source/OpenWorld/OpenWorldGeneratedMounts.h` | polohy zbraní na těle; generuje skript, ručně needitovat |
 | `Source/OpenWorld/OpenWorldAnimInstance.*` | vrstvy držení a útoku nad animačním Blueprintem, zastavení a návrat seku |
 | `Source/OpenWorld/OpenWorldPhysicalMaterial.*` | látka: fyzikální materiál s tvrdostí a houževnatostí |
 | `Source/OpenWorld/OpenWorldProp.*` | pevný předmět z jedné látky (kůl, blok, bedna), dá se rozbít |
@@ -67,9 +75,10 @@ ve skriptu a nové spuštění, ne ruční zásah do assetu.
 |---|---|
 | `owlib.py` | sdílená knihovna: matematika, kostra a IK, kolizní povrch postavy, tvary zbraní |
 | `create_materials.py` | textury, materiály a látky pro ocel a dřevo; spouští se před `create_weapons.py` |
-| `create_weapons.py` | meč, obouruční meč, štít včetně kolizních tvarů a látky |
-| `create_attack_anims.py` | držení zbraní a útoky; `SLASH_PREVIEW=1` jen náhled, `SLASH_ONLY=<sestava>` jen jedna |
-| `audit_collisions.py` | měří průniky těla, zbraní a štítu ve všech kombinacích pohybu |
+| `create_weapons.py` | meč, obouruční meč, štít a pochva včetně kolizních tvarů a látky |
+| `create_attack_anims.py` | bojové střehy, útoky a polohy zbraní na těle; `SLASH_PREVIEW=1` jen náhled, `SLASH_ONLY=<sestava>` jen jedna, `SLASH_MOUNTS_ONLY=1` jen polohy na těle |
+| `audit_collisions.py` | měří průniky těla, zbraní a štítu ve všech kombinacích stavu a pohybu (24 případů) |
+| `mounts.json` | polohy zbraní na těle pro kontrolu; generuje `create_attack_anims.py` |
 | `setup_anim_blueprint.py` | nastaví rodiče `ABP_Unarmed` (stačí jednou) |
 
 Skripty běží přes Python v editoru, **se zavřeným Unreal Editorem**:
@@ -85,11 +94,58 @@ Skripty běží přes Python v editoru, **se zavřeným Unreal Editorem**:
 na řádcích `OWSELFTEST` a `OWCONTACT`: polohy rukou, zásahy do dřeva a oceli a hlavně
 `deepest_blade_in_target`, tedy jak hluboko se vykreslená čepel dostala do terče. Má být do 1 cm.
 
-**Stav.** Hotovo: kamera, sprint, dvě sestavy zbraní s držením a seky, útok za běhu, kontrola průniků
-animací, látky ocel a dřevo, střet čepele se zastavením o povrch a fyzikální reakcí.
+Když skript změní polohy zbraní na těle, přepíše i `OpenWorldGeneratedMounts.h`, takže je potom
+potřeba hru znovu zkompilovat.
 
-**Další na řadě** (podrobnosti ve „Fyzika ve hře“): pohyb tasení a schování zbraní, pak držený
-předmět odtlačovaný překážkou. Co pravidlo 1 zatím nesplňuje, je tamtéž v otevřených otázkách.
+**Stav** (commit `bf2c94c`). Hotovo: kamera, sprint, dvě sestavy zbraní, nebojový a bojový stav
+s tasením na první stisk a schováním po 15 s, bojové střehy, seky i za běhu, kontrola průniků
+(0 ve 24 případech), látky ocel a dřevo, střet čepele se zastavením o povrch a fyzikální reakcí.
+
+**Co dál** je v sekci „Plán dalších kroků“.
+
+## Jak pracujeme
+
+- **Uživatel hru zkouší v editoru a hodnotí, jak vypadá.** Já vzhled nevidím, ověřuji měřením:
+  kontrolou průniků a testem ve hře. Do hlášení patří naměřená čísla a otevřeně i to, co ověřené není.
+- **Větší změnu chování nejdřív popsat a nechat schválit.** Uživatel má jasnou představu o hraní a
+  návrh, který ji míjí, vrátí.
+- **Commit a push až na pokyn,** každé zvlášť. Uživatel je potvrzuje po vyzkoušení.
+- **Před skripty a kompilací musí být zavřený Unreal Editor.** Po pádu editoru může knihovnu hry
+  držet okno Crash Reporteru (`CrashReportClientEditor`), dokud se nezavře.
+- **Python v systému není.** Na pomocné skripty mimo editor použít ten z enginu:
+  `C:/Program Files/Epic Games/UE_5.8/Engine/Binaries/ThirdParty/Python3/Win64/python.exe`.
+- **Dlouhé běhy** (generování animací trvá minuty) pouštět na pozadí.
+
+## Plán dalších kroků
+
+V tomto pořadí, pokud uživatel neřekne jinak. Každý krok končí kontrolou průniků, testem ve hře
+a vyzkoušením uživatelem.
+
+1. **Pohyb tasení a schování zbraní.** Dnes zbraň přeskočí z těla do ruky a paže se do střehu jen
+   prolnou (0,3 s). Cíl: ruka sáhne pro zbraň, vezme ji a přenese do střehu, bez průniku.
+   - Meč z pochvy: čepel musí vyjíždět po ose pochvy. Paže na plný tah 80 cm z levého boku nedosáhne,
+     takže se pochva musí při tasení natáčet za čepelí kolem svého závěsu (ústí zůstává na místě).
+   - Obouruční meč ze zad: krátce povytáhnout po ose a pak přetočit přes pravé rameno dopředu.
+   - Štít ze zad: rukou za záda mezi lopatky dosáhnout nejde. Realisticky se štít na řemenu přesune
+     kolem levého boku dopředu a ruka ho převezme.
+   - Zbraň se má přichytit k ruce ve chvíli, kdy úchop ruky přesně sedí na její poloze na těle, aby
+     nepřeskočila.
+   - Schování je stejný pohyb pozpátku. Během pohybu se nesmí dát útočit, nebo se má útok zařadit.
+2. **Držený předmět odtlačovaný překážkou** (viz „Fyzika ve hře“, rozhodnuto uživatelem). Body
+   předmětu, které by skončily ve stěně, odtlačit ven, z toho spočítat posun a natočení předmětu
+   a dopočítat paži. Jen proti pevnému okolí, ne proti nepřátelům. Stejný postup pak použít na
+   vlastní výbavu: lokty proti štítu na zádech, což by nahradilo dnešní tlumení švihu paží.
+3. **Doladění toho, co je hotové jen zhruba:**
+   - štít na zádech sedí vysoko (střed u krku, přesah 10 cm nad hlavu),
+   - bojový střeh je ve stoje nehybný, chybí v něm dýchání,
+   - volná bedna se po zásahu obouručním mečem dostane 3,4 cm do čepele,
+   - při startu útoku ve stoje se chodidla posunou asi o 4 cm,
+   - levé zápěstí při obouručním seku se krátce ohne až o 81° a předloktí přetočí o 108°.
+4. **Nepřítel a krytí štítem.** Cíl, který se hýbe a útočí, zásah počítaný na povrch těla místo
+   kolizní kapsle a štít, který ránu zastaví podle stejných pravidel jako čepel.
+5. **Deformace a viditelné poškození** podle látky (zásek ve dřevě, promáčknutí, rozbití na kusy).
+6. **Samotný otevřený svět:** krajina, World Partition, procedurální rozmístění. Zatím se hraje na
+   mapě ze šablony.
 
 ## Pravidla
 
