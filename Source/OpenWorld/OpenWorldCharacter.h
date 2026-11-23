@@ -130,6 +130,10 @@ protected:
 	UPROPERTY(EditAnywhere, Category="Combat|Attack")
 	bool bFaceCameraOnAttack = true;
 
+	/** Ignore movement input while the attack animation plays (it is a full-body animation with planted feet) */
+	UPROPERTY(EditAnywhere, Category="Combat|Attack")
+	bool bLockMovementWhileAttacking = true;
+
 	/** A click this long before the combo window still continues the combo */
 	UPROPERTY(EditAnywhere, Category="Combat|Attack", meta=(ClampMin="0", Units="s"))
 	float ComboInputCacheTime = 0.45f;
