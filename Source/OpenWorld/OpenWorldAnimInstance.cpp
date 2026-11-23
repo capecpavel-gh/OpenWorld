@@ -227,16 +227,43 @@ void UOpenWorldAnimInstance::PlayOverlay(UAnimSequence* Sequence, float BlendInT
 	OverlayStartWeight = OverlayWeight;
 	OverlayBlendIn = FMath::Max(BlendInTime, 0.f);
 	OverlayBlendOut = FMath::Max(BlendOutTime, 0.f);
+	OverlayStopTime = -1.f;
+	OverlayHoldRemaining = 0.f;
+	OverlayFadeElapsed = 0.f;
+	OverlayRewindRate = 0.f;
+	bOverlayRewinding = false;
 }
 
 void UOpenWorldAnimInstance::StopOverlay(float BlendOutTime)
 {
-	if (OverlaySequence != nullptr)
+	HoldOverlay(OverlayTime, 0.f, BlendOutTime);
+}
+
+void UOpenWorldAnimInstance::HoldOverlay(float AtTime, float HoldSeconds, float BlendOutTime)
+{
+	if (OverlaySequence == nullptr || OverlayStopTime >= 0.f)
 	{
-		// Jump to the start of a blend-out of the requested length
-		OverlayBlendOut = FMath::Max(BlendOutTime, KINDA_SMALL_NUMBER);
-		OverlayTime = FMath::Max(OverlayTime, OverlaySequence->GetPlayLength() - OverlayBlendOut);
+		return;
 	}
+
+	// Never rewinds: the pose that is already on screen stays, the animation just does not go past AtTime
+	OverlayStopTime = FMath::Clamp(AtTime, OverlayTime, OverlaySequence->GetPlayLength());
+	OverlayHoldRemaining = FMath::Max(HoldSeconds, 0.f);
+	OverlayFadeDuration = FMath::Max(BlendOutTime, KINDA_SMALL_NUMBER);
+	OverlayFadeElapsed = 0.f;
+	OverlayRewindRate = 0.f;
+	bOverlayRewinding = false;
+}
+
+void UOpenWorldAnimInstance::HoldAndRewindOverlay(float AtTime, float HoldSeconds, float RewindRate)
+{
+	if (OverlaySequence == nullptr || OverlayStopTime >= 0.f)
+	{
+		return;
+	}
+
+	HoldOverlay(AtTime, HoldSeconds, 0.f);
+	OverlayRewindRate = FMath::Max(RewindRate, 0.1f);
 }
 
 void UOpenWorldAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
@@ -267,21 +294,52 @@ void UOpenWorldAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		return;
 	}
 
-	OverlayTime += DeltaSeconds;
+	// Advance, unless the overlay has reached the time it was told to stop at: then hold, then fade
+	float Fade = 1.f;
+	bool bRewound = false;
+	if (bOverlayRewinding)
+	{
+		// Back along the path the pose came by; the blend-in ramp fades it out as it nears the start
+		OverlayTime -= DeltaSeconds * OverlayRewindRate;
+		bRewound = OverlayTime <= 0.f;
+	}
+	else if (OverlayStopTime >= 0.f && OverlayTime + DeltaSeconds >= OverlayStopTime)
+	{
+		OverlayTime = OverlayStopTime;
+		if (OverlayHoldRemaining > 0.f)
+		{
+			OverlayHoldRemaining -= DeltaSeconds;
+		}
+		else if (OverlayRewindRate > 0.f)
+		{
+			bOverlayRewinding = true;
+		}
+		else
+		{
+			OverlayFadeElapsed += DeltaSeconds;
+			Fade = 1.f - FMath::SmoothStep(0.f, 1.f, OverlayFadeElapsed / OverlayFadeDuration);
+		}
+	}
+	else
+	{
+		OverlayTime += DeltaSeconds;
+	}
 
 	const float Length = OverlaySequence->GetPlayLength();
-	if (OverlayTime >= Length)
+	if (OverlayTime >= Length || Fade <= 0.f || bRewound)
 	{
+		bOverlayRewinding = false;
 		OverlaySequence = nullptr;
 		PreviousOverlaySequence = nullptr;
 		OverlayWeight = 0.f;
 		CrossfadeAlpha = 1.f;
+		OverlayStopTime = -1.f;
 		return;
 	}
 
 	const float In = OverlayBlendIn > 0.f ? FMath::Clamp(OverlayTime / OverlayBlendIn, 0.f, 1.f) : 1.f;
 	const float Out = OverlayBlendOut > 0.f ? FMath::Clamp((Length - OverlayTime) / OverlayBlendOut, 0.f, 1.f) : 1.f;
-	OverlayWeight = FMath::Min(FMath::Lerp(OverlayStartWeight, 1.f, FMath::SmoothStep(0.f, 1.f, In)), FMath::SmoothStep(0.f, 1.f, Out));
+	OverlayWeight = Fade * FMath::Min(FMath::Lerp(OverlayStartWeight, 1.f, FMath::SmoothStep(0.f, 1.f, In)), FMath::SmoothStep(0.f, 1.f, Out));
 
 	if (PreviousOverlaySequence != nullptr)
 	{

@@ -80,9 +80,24 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Overlay")
 	void PlayOverlay(UAnimSequence* Sequence, float BlendInTime = 0.1f, float BlendOutTime = 0.22f);
 
-	/** Fades the current overlay animation out */
+	/** Freezes the current overlay animation where it is and fades it out */
 	UFUNCTION(BlueprintCallable, Category="Overlay")
 	void StopOverlay(float BlendOutTime = 0.15f);
+
+	/**
+	 *  Lets the overlay animation play only up to AtTime, holds that pose for HoldSeconds and then fades it out.
+	 */
+	UFUNCTION(BlueprintCallable, Category="Overlay")
+	void HoldOverlay(float AtTime, float HoldSeconds, float BlendOutTime);
+
+	/**
+	 *  Lets the overlay animation play only up to AtTime, holds that pose for HoldSeconds and then plays it
+	 *  backwards to its start at RewindRate times normal speed.
+	 *  Used when a weapon meets a surface: the swing stops exactly at the moment of contact and the weapon
+	 *  goes back the way it came, which is the one path known to be free.
+	 */
+	UFUNCTION(BlueprintCallable, Category="Overlay")
+	void HoldAndRewindOverlay(float AtTime, float HoldSeconds, float RewindRate);
 
 	UFUNCTION(BlueprintPure, Category="Overlay")
 	bool IsOverlayPlaying() const { return OverlaySequence != nullptr; }
@@ -90,6 +105,18 @@ public:
 	/** Current time in the overlay animation [s] */
 	UFUNCTION(BlueprintPure, Category="Overlay")
 	float GetOverlayTime() const { return OverlayTime; }
+
+	/** How much the legs and hips follow the overlay animation right now (1 = standing, 0 = running) */
+	UFUNCTION(BlueprintPure, Category="Overlay")
+	float GetLowerBodyWeight() const { return LowerBodyWeight; }
+
+	/** How strongly the overlay animation is applied right now (0..1) */
+	UFUNCTION(BlueprintPure, Category="Overlay")
+	float GetOverlayWeight() const { return OverlayWeight; }
+
+	/** True once the overlay has been told to stop (it may still be holding or fading out) */
+	UFUNCTION(BlueprintPure, Category="Overlay")
+	bool IsOverlayStopping() const { return OverlayStopTime >= 0.f; }
 
 protected:
 
@@ -141,4 +168,14 @@ private:
 
 	float StanceAlpha = 1.f;
 	float StanceBlendTime = 0.25f;
+
+	/** Overlay time at which the animation freezes (< 0 = plays to its end) */
+	float OverlayStopTime = -1.f;
+	float OverlayHoldRemaining = 0.f;
+	float OverlayFadeDuration = 0.15f;
+	float OverlayFadeElapsed = 0.f;
+
+	/** > 0: after the hold the overlay plays backwards to its start at this rate instead of fading */
+	float OverlayRewindRate = 0.f;
+	bool bOverlayRewinding = false;
 };

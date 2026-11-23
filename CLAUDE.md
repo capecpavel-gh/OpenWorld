@@ -22,7 +22,22 @@ Quinn má jiné proporce než výchozí Manny, i když sdílejí kostru. Všechn
 | levý Shift | sprint |
 
 **Sestavy zbraní** (`FOpenWorldLoadout` v `OpenWorldCharacter.h`): meč + štít, obouruční meč.
-Každá má model do pravé a levé ruky, držení (stance), animaci útoku a časy zásahu.
+Každá má model do pravé a levé ruky, držení (stance), animaci útoku, okno zásahu, rozměry čepele,
+hmotnost a látku, ze které je čepel.
+
+**Látky.** Všechno pevné je z nějaké látky (`UOpenWorldPhysicalMaterial`): tření, pružnost a hustota
+z enginu plus tvrdost a houževnatost. Zatím existuje ocel (tvrdost 7,5) a dřevo (2,5). Látku nese
+materiál i kolize modelu, takže ji zásah vždy zjistí.
+
+**Střet čepele** (`UpdateBladeContact` a `ResolveContact` v `OpenWorldCharacter.cpp`):
+1. Každý snímek seku se z animace spočítá, kde bude čepel v póze, která se teprve vykreslí.
+2. Body čepele se protáhnou světem z nynější polohy do té příští. První povrch v cestě sek zastaví
+   přesně v okamžiku dotyku, dřív než se průnik vykreslí.
+3. Podle tvrdosti se čepel buď zasekne (tvrdší než cíl), nebo odskočí. Cíl dostane poškození a ráz.
+4. Meč se vrátí stejnou dráhou, kterou přišel. Ta je jediná zaručeně volná.
+
+Zbraň a štít v ruce jsou zároveň pevný povrch pro volné fyzikální předměty.
+Herní režim (`OpenWorldGameMode`) staví před start hráče řadu zkušebních terčů ze dřeva a oceli.
 
 **Animace se skládají ve třech vrstvách** (`OpenWorldAnimInstance`, rodič animačního Blueprintu `ABP_Unarmed`):
 1. pohyb z animačního Blueprintu (stání, chůze, běh, skok),
@@ -33,9 +48,13 @@ Každá má model do pravé a levé ruky, držení (stance), animaci útoku a č
 
 | Cesta | Obsah |
 |---|---|
-| `Source/OpenWorld/OpenWorldCharacter.*` | kamera, vstupy, sprint, sestavy, útok, zásah |
-| `Source/OpenWorld/OpenWorldAnimInstance.*` | vrstvy držení a útoku nad animačním Blueprintem |
+| `Source/OpenWorld/OpenWorldCharacter.*` | kamera, vstupy, sprint, sestavy, útok, střet čepele, test ve hře |
+| `Source/OpenWorld/OpenWorldAnimInstance.*` | vrstvy držení a útoku nad animačním Blueprintem, zastavení a návrat seku |
+| `Source/OpenWorld/OpenWorldPhysicalMaterial.*` | látka: fyzikální materiál s tvrdostí a houževnatostí |
+| `Source/OpenWorld/OpenWorldProp.*` | pevný předmět z jedné látky (kůl, blok, bedna), dá se rozbít |
+| `Source/OpenWorld/OpenWorldGameMode.*` | herní režim, zkušební terče |
 | `Source/OpenWorld/OpenWorldPlayerController.*` | kurzor myši, limity náklonu kamery |
+| `Content/Materials/Substances/` | vygenerované textury, materiály a látky (ocel, dřevo) |
 | `Source/OpenWorld/Variant_*` | ukázky ze šablony Epicu (Combat, Platforming, SideScrolling), hra je nepoužívá |
 | `Content/Weapons/` | vygenerované modely, materiály a animace zbraní |
 | `Content/ThirdPerson/`, `Content/Characters/` | obsah šablony: mapa, Blueprinty hráče, mannequin |
@@ -47,7 +66,8 @@ ve skriptu a nové spuštění, ne ruční zásah do assetu.
 | Skript | K čemu |
 |---|---|
 | `owlib.py` | sdílená knihovna: matematika, kostra a IK, kolizní povrch postavy, tvary zbraní |
-| `create_weapons.py` | meč, obouruční meč, štít včetně kolizních tvarů |
+| `create_materials.py` | textury, materiály a látky pro ocel a dřevo; spouští se před `create_weapons.py` |
+| `create_weapons.py` | meč, obouruční meč, štít včetně kolizních tvarů a látky |
 | `create_attack_anims.py` | držení zbraní a útoky; `SLASH_PREVIEW=1` jen náhled, `SLASH_ONLY=<sestava>` jen jedna |
 | `audit_collisions.py` | měří průniky těla, zbraní a štítu ve všech kombinacích pohybu |
 | `setup_anim_blueprint.py` | nastaví rodiče `ABP_Unarmed` (stačí jednou) |
@@ -60,12 +80,19 @@ Skripty běží přes Python v editoru, **se zavřeným Unreal Editorem**:
 
     "C:/Program Files/Epic Games/UE_5.8/Engine/Build/BatchFiles/Build.bat" OpenWorldEditor Win64 Development -Project="C:/Dev/OpenWorld/OpenWorld.uproject" -WaitMutex
 
-**Test ve hře bez okna:** `UnrealEditor-Cmd.exe OpenWorld.uproject -game -OWSelfTest -NullRHI`, výsledky jsou
-v logu na řádcích `OWSELFTEST` (polohy rukou, rychlost, stav útoku).
+**Test ve hře bez okna:** `UnrealEditor-Cmd.exe OpenWorld.uproject -game -OWSelfTest -NullRHI -benchmark -fps=60`
+(bez `-benchmark -fps=60` běží na tisících snímků za sekundu a nic nevypovídá). Výsledky jsou v logu
+na řádcích `OWSELFTEST` a `OWCONTACT`: polohy rukou, zásahy do dřeva a oceli a hlavně
+`deepest_blade_in_target`, tedy jak hluboko se vykreslená čepel dostala do terče. Má být do 1 cm.
 
-**Stav.** Hotovo: kamera, sprint, dvě sestavy zbraní s držením a seky, útok za běhu, kontrola průniků.
-Další na řadě: střet ve hře (pravidlo 1, bod 3). Zásah se zatím vyhodnocuje koulí před postavou,
-ne dráhou čepele, a meč se o nic nezastaví.
+**Stav.** Hotovo: kamera, sprint, dvě sestavy zbraní s držením a seky, útok za běhu, kontrola průniků
+animací, látky ocel a dřevo, střet čepele se zastavením o povrch a fyzikální reakcí.
+
+**Co pravidlo 1 zatím nesplňuje:**
+- Nesená zbraň projde zdí, když k ní postava dojde. Střet se hlídá jen během seku.
+- U postav se zásah počítá na kolizní kapsli, ne na povrch těla.
+- Deformace a viditelné poškození neexistují. Předmět má jen výdrž a po jejím vyčerpání zmizí.
+- Štít útoky nekryje (zatím nikdo neútočí).
 
 ## Pravidla
 
@@ -109,6 +136,16 @@ Před prací v oblasti, které se některé poučení týká, si ho přečíst.
 - **Počítat s tím, že uložení data změní.** Uložená animace se po kompresi lišila od vypočítané až
   o 2 cm a délka mimo násobek 1/30 s kompresi shodila. Po uložení načíst zpět a změřit znovu,
   s rezervou na nepřesnost.
+- **Cesta zpět je taky pohyb.** Meč se o terč zastavil správně, ale při návratu do držení jím projel
+  (15,9 cm). Každý pohyb, i ten „úklidový“ po hlavní akci, musí splnit stejná pravidla jako akce sama.
+- **Pravidlo o dvou věcech platí oběma směry.** Čepel se zastavila o bednu, ale bedna pak vjela do
+  čepele, protože zbraň neměla pro fyziku povrch. U každého vztahu ověřit obě strany v pohybu.
+- **Když číslo nesedí, nejdřív ověřit měření.** Třikrát jsem ladil hru podle údaje, který byl špatně
+  změřený (porovnání o snímek vedle, terč mimo dosah). Než opravím měřenou věc, zkontrolovat, co
+  přesně měření porovnává.
+- **Testovat za podmínek, ve kterých hra běží.** Test bez okna běžel na 2000 snímcích za sekundu, takže
+  neodhalil nic, co závisí na délce snímku. Podmínky testu (rychlost, rozměry, časování) nastavit
+  jako ve skutečném provozu.
 - **Nenastavovat funkce pro tým, když pracuje jeden člověk.** Zamykání souborů v Git LFS udělalo
   z assetů soubory jen pro čtení a blokovalo úpravy. Výchozí nastavení volit podle skutečného provozu.
 - **Názvy nesmí kolidovat s vestavěnými.** Projekt pojmenovaný `Temp` se nezkompiloval, protože z názvu

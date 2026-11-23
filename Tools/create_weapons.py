@@ -4,6 +4,9 @@ Builds the weapon Static Mesh assets and their materials:
   /Game/Weapons/Greatsword/SM_Greatsword  two-handed sword
   /Game/Weapons/Shield/SM_Shield          round centre-grip shield
 
+Steel and wood come from create_materials.py (run it first): textured materials plus the physical
+materials that give each mesh its substance (hardness, density) for contacts.
+
 Run (Unreal Editor must be closed):
   "C:/Program Files/Epic Games/UE_5.8/Engine/Binaries/Win64/UnrealEditor-Cmd.exe" C:/Dev/OpenWorld/OpenWorld.uproject
       -run=pythonscript -script=C:/Dev/OpenWorld/Tools/create_weapons.py -unattended -nosplash -NullRHI
@@ -16,14 +19,11 @@ Mesh axes match the HandGrip_R / HandGrip_L sockets of the mannequin:
 import unreal
 
 MATERIAL_DIR = "/Game/Weapons/Materials"
+SUBSTANCE_DIR = "/Game/Materials/Substances"
 
-# name -> (base colour, metallic, roughness)
+# Flat-coloured materials built here: name -> (base colour, metallic, roughness)
 MATERIALS = {
-    "MI_Sword_Blade": (unreal.LinearColor(0.75, 0.77, 0.80, 1.0), 1.0, 0.22),
-    "MI_Sword_Guard": (unreal.LinearColor(0.80, 0.55, 0.20, 1.0), 1.0, 0.35),
-    "MI_Sword_Grip": (unreal.LinearColor(0.12, 0.06, 0.03, 1.0), 0.0, 0.75),
-    "MI_Shield_Wood": (unreal.LinearColor(0.23, 0.11, 0.05, 1.0), 0.0, 0.80),
-    "MI_Shield_Metal": (unreal.LinearColor(0.55, 0.56, 0.58, 1.0), 1.0, 0.38),
+    "MI_Sword_Grip": (unreal.LinearColor(0.12, 0.06, 0.03, 1.0), 0.0, 0.75),      # leather wrap
 }
 
 # Dimensions in centimetres. grip_below / grip_above: grip length below and above the right hand.
@@ -35,14 +35,18 @@ SWORDS = {
         grip_below=20.0, grip_above=7.0, grip_radius=1.6, guard_width=28.0, guard_thickness=2.8, guard_height=2.8,
         blade_length=108.0, blade_half_width=3.2, blade_thickness=1.0, pommel_radius=2.8, pommel_height=4.0),
 }
-SWORD_SLOTS = ["MI_Sword_Blade", "MI_Sword_Guard", "MI_Sword_Grip"]
+# Blade and guard are steel; the grip is wrapped in leather
+SWORD_SLOTS = [SUBSTANCE_DIR + "/MI_Steel", SUBSTANCE_DIR + "/MI_SteelDark", "MI_Sword_Grip"]
+SWORD_SUBSTANCE = SUBSTANCE_DIR + "/PM_Steel"
 BLADE, GUARD, GRIP = 0, 1, 2
 
 SHIELD_PATH = "/Game/Weapons/Shield/SM_Shield"
 # plate_offset: the plate starts this far in front of the grip, so the forearm lies behind it without touching (arm-strap shield)
 SHIELD = dict(radius=30.0, plate_thickness=2.0, plate_offset=8.0, rim_extra=1.6, rim_thickness=0.8,
               boss_radius=7.0, boss_depth=0.4, handle_length=22.0, handle_thickness=2.4)
-SHIELD_SLOTS = ["MI_Shield_Wood", "MI_Shield_Metal"]
+# A wooden shield with a steel rim and boss
+SHIELD_SLOTS = [SUBSTANCE_DIR + "/MI_Wood", SUBSTANCE_DIR + "/MI_SteelDark"]
+SHIELD_SUBSTANCE = SUBSTANCE_DIR + "/PM_Wood"
 WOOD, METAL = 0, 1
 
 asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
@@ -170,7 +174,7 @@ def build_shield(d):
     return mesh
 
 
-def save_static_mesh(mesh, asset_path, slot_materials, collision_method):
+def save_static_mesh(mesh, asset_path, slot_materials, collision_method, substance):
     if eal.does_asset_exist(asset_path):
         # Rewrite in place: the character references these meshes, so they can not be deleted and recreated
         static_mesh = unreal.load_asset(asset_path)
@@ -205,21 +209,39 @@ def save_static_mesh(mesh, asset_path, slot_materials, collision_method):
     collision_options.emit_transaction = False
     collision.set_static_mesh_collision_from_mesh(mesh, static_mesh, collision_options)
     shapes = collision.get_simple_collision_shape_count(collision.get_simple_collision_from_static_mesh(static_mesh))
+    # What the mesh is made of, for anything that hits its collision surface
+    static_mesh.get_editor_property("body_setup").set_editor_property("phys_material", substance)
     eal.save_loaded_asset(static_mesh)
 
     bounds = static_mesh.get_bounding_box()
-    unreal.log_warning("WEAPON {} min=({:.1f},{:.1f},{:.1f}) max=({:.1f},{:.1f},{:.1f}) collision shapes={} materials={}".format(
+    unreal.log_warning("WEAPON {} min=({:.1f},{:.1f},{:.1f}) max=({:.1f},{:.1f},{:.1f}) collision shapes={} substance={} materials={}".format(
         asset_path, bounds.min.x, bounds.min.y, bounds.min.z, bounds.max.x, bounds.max.y, bounds.max.z,
-        shapes, [m.get_name() for m in slot_materials]))
+        shapes, substance.get_name(), [m.get_name() for m in slot_materials]))
 
 
 def main():
-    materials = create_materials()
+    flat = create_materials()
+
+    def resolve(names):
+        """Slot names are either a flat material built above or a path of a material from create_materials.py."""
+        result = []
+        for name in names:
+            material = flat.get(name) or unreal.load_asset(name)
+            if not material:
+                raise RuntimeError("Missing material {} (run create_materials.py first)".format(name))
+            result.append(material)
+        return result
+
+    steel = unreal.load_asset(SWORD_SUBSTANCE)
+    wood = unreal.load_asset(SHIELD_SUBSTANCE)
+    if not steel or not wood:
+        raise RuntimeError("Missing physical materials (run create_materials.py first)")
+
     for path, dimensions in SWORDS.items():
-        save_static_mesh(build_sword(dimensions), path, [materials[name] for name in SWORD_SLOTS],
-                         unreal.GeometryScriptCollisionGenerationMethod.ORIENTED_BOXES)
-    save_static_mesh(build_shield(SHIELD), SHIELD_PATH, [materials[name] for name in SHIELD_SLOTS],
-                     unreal.GeometryScriptCollisionGenerationMethod.CONVEX_HULLS)
+        save_static_mesh(build_sword(dimensions), path, resolve(SWORD_SLOTS),
+                         unreal.GeometryScriptCollisionGenerationMethod.ORIENTED_BOXES, steel)
+    save_static_mesh(build_shield(SHIELD), SHIELD_PATH, resolve(SHIELD_SLOTS),
+                     unreal.GeometryScriptCollisionGenerationMethod.CONVEX_HULLS, wood)
 
 
 main()

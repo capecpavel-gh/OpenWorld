@@ -15,7 +15,10 @@ class UInputAction;
 class UInputMappingContext;
 class UAnimSequence;
 class UOpenWorldAnimInstance;
+class UOpenWorldPhysicalMaterial;
+class AOpenWorldProp;
 struct FInputActionValue;
+struct FHitResult;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogTemplateCharacter, Log, All);
 
@@ -44,29 +47,52 @@ struct FOpenWorldLoadout
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout")
 	TObjectPtr<UAnimSequence> AttackAnimation;
 
-	/** Time in the attack animation when the hit is checked */
+	/** Part of the attack animation in which the blade can strike something: from the top of the wind-up... */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout", meta=(ClampMin="0", Units="s"))
-	float HitTime = 0.38f;
+	float HitWindowStart = 0.27f;
+
+	/** ...to the end of the follow-through */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout", meta=(ClampMin="0", Units="s"))
+	float HitWindowEnd = 0.52f;
 
 	/** From this time on a queued click chains straight into the next attack */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout", meta=(ClampMin="0", Units="s"))
 	float ComboTime = 0.66f;
 
-	/** Reach of the hit check */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout", meta=(ClampMin="0", Units="cm"))
-	float TraceDistance = 110.f;
+	/** The blade along the grip socket's Z axis: where it starts above the hand... */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout", meta=(Units="cm"))
+	float BladeStart = 8.4f;
 
-	/** Radius of the hit check */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout", meta=(ClampMin="0", Units="cm"))
-	float TraceRadius = 45.f;
+	/** ...and where its tip is */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout", meta=(Units="cm"))
+	float BladeEnd = 88.4f;
 
-	/** Damage dealt per hit */
+	/** Half thickness of the blade, used when sweeping it through the world */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout", meta=(ClampMin="0.1", Units="cm"))
+	float BladeRadius = 1.5f;
+
+	/** Damage of a full-speed hit on a material of the same hardness */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout", meta=(ClampMin="0"))
 	float Damage = 1.f;
 
-	/** Knockback applied to hit targets */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout", meta=(ClampMin="0"))
-	float KnockbackImpulse = 250.f;
+	/** Mass of the weapon; with the blade's speed it gives the push a hit delivers */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout", meta=(ClampMin="0", Units="kg"))
+	float WeaponMass = 1.3f;
+
+	/** What the blade is made of (hardness decides whether it bites into a surface or rings off it) */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout")
+	TObjectPtr<UOpenWorldPhysicalMaterial> WeaponSubstance;
+};
+
+/** The last time a weapon met a surface */
+struct FOpenWorldContact
+{
+	bool bValid = false;
+	bool bBites = false;
+	float Time = 0.f;
+	float Damage = 0.f;
+	FVector ImpactPoint = FVector::ZeroVector;
+	TWeakObjectPtr<UPrimitiveComponent> Target;
 };
 
 /**
@@ -200,6 +226,49 @@ protected:
 	UPROPERTY(EditAnywhere, Category="Combat|Attack", meta=(ClampMin="0", Units="s"))
 	float ComboInputCacheTime = 0.45f;
 
+	/** Points along the blade that are swept through the world every frame of the cut */
+	UPROPERTY(EditAnywhere, Category="Combat|Contact", meta=(ClampMin="2", ClampMax="16"))
+	int32 BladeSamples = 7;
+
+	/** Bone the attack's upper body hangs from; bones above it are predicted from the attack animation */
+	UPROPERTY(EditAnywhere, Category="Combat|Contact")
+	FName BladeChainRootParent = TEXT("pelvis");
+
+	/** How much of the body's weight is behind the blade, as a multiple of the weapon's mass */
+	UPROPERTY(EditAnywhere, Category="Combat|Contact", meta=(ClampMin="0"))
+	float StrikeMassScale = 3.f;
+
+	/** The blade bites into a surface when it is at least this many times harder than it; otherwise it rings off */
+	UPROPERTY(EditAnywhere, Category="Combat|Contact", meta=(ClampMin="0"))
+	float BiteHardnessRatio = 1.2f;
+
+	/** Hardness assumed for surfaces and blades without an OpenWorld physical material */
+	UPROPERTY(EditAnywhere, Category="Combat|Contact", meta=(ClampMin="0.1"))
+	float DefaultHardness = 5.f;
+
+	/** Blade speed at which a hit deals the loadout's full damage */
+	UPROPERTY(EditAnywhere, Category="Combat|Contact", meta=(ClampMin="1", Units="cm/s"))
+	float ReferenceBladeSpeed = 1200.f;
+
+	/** How long the blade stays stuck after biting into a softer material... */
+	UPROPERTY(EditAnywhere, Category="Combat|Contact", meta=(ClampMin="0", Units="s"))
+	float BiteHoldTime = 0.12f;
+
+	/** ...and how fast it is then drawn back along the path it came by (1 = the speed of the swing) */
+	UPROPERTY(EditAnywhere, Category="Combat|Contact", meta=(ClampMin="0.1"))
+	float BiteRewindRate = 1.2f;
+
+	/** The same for a blade that rings off a material as hard as itself */
+	UPROPERTY(EditAnywhere, Category="Combat|Contact", meta=(ClampMin="0", Units="s"))
+	float BounceHoldTime = 0.04f;
+
+	UPROPERTY(EditAnywhere, Category="Combat|Contact", meta=(ClampMin="0.1"))
+	float BounceRewindRate = 2.0f;
+
+	/** Print what met what, with hardness and damage, on screen */
+	UPROPERTY(EditAnywhere, Category="Combat|Contact")
+	bool bShowContactReports = true;
+
 public:
 
 	/** Constructor */
@@ -237,11 +306,17 @@ protected:
 	void Attack();
 	void StartAttack();
 
-	/** Advances the running attack: hit check, combo chaining, end */
-	void UpdateAttack();
+	/** Advances the running attack: blade contact, combo chaining, end */
+	void UpdateAttack(float DeltaSeconds);
 
-	/** Sweeps in front of the character and damages / pushes what the weapon hits */
-	void DoAttackTrace(const FOpenWorldLoadout& Loadout);
+	/** World positions of points along the blade at a time of the attack animation, before that pose is on screen */
+	bool PredictBladePoints(const FOpenWorldLoadout& Loadout, float Time, const FTransform& MeshToWorld, TArray<FVector>& OutPoints) const;
+
+	/** Sweeps the blade from where it is to where the animation is about to put it; stops the swing at the first surface */
+	void UpdateBladeContact(float DeltaSeconds);
+
+	/** The blade met a surface at ContactTime of the attack: stop there, then let the materials and physics decide */
+	void ResolveContact(const FOpenWorldLoadout& Loadout, const FHitResult& Hit, const FVector& BladeVelocity, float ContactTime);
 
 	UOpenWorldAnimInstance* GetOverlayAnimInstance() const;
 
@@ -260,8 +335,13 @@ private:
 	/** Attack state */
 	int32 CurrentLoadoutIndex = INDEX_NONE;
 	bool bIsAttacking = false;
-	bool bHitChecked = false;
 	float CachedAttackInputTime = -1000.f;
+
+	/** Blade contact: points along the blade in the pose that is on screen, and whether this swing already hit */
+	TArray<FVector> BladePoints;
+	bool bBladeTracked = false;
+	bool bContactDone = false;
+	FOpenWorldContact LastContact;
 
 #if !UE_BUILD_SHIPPING
 	/** Scripted run started with -OWSelfTest on the command line; logs what the attacks do */
@@ -270,6 +350,12 @@ private:
 	float SelfTestTime = 0.f;
 	float SelfTestNextLog = 0.f;
 	int32 SelfTestStep = 0;
+	TWeakObjectPtr<AOpenWorldProp> SelfTestTarget;
+	FVector SelfTestTargetStart = FVector::ZeroVector;
+	float SelfTestMaxDepth = 0.f;
+	float SelfTestMaxPredictionError = 0.f;
+	TArray<FVector> SelfTestPredicted;
+	TArray<FVector> SelfTestPredictedEarlier;
 #endif
 
 public:
