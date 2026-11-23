@@ -36,7 +36,11 @@ struct FOpenWorldLoadout
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout")
 	TObjectPtr<UStaticMesh> OffHandMesh;
 
-	/** Attack animation, played over the upper body (and the whole body while standing) */
+	/** How this equipment is carried: the arms hold this pose while standing, walking and running */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout")
+	TObjectPtr<UAnimSequence> StanceAnimation;
+
+	/** Attack animation, played over the upper body (and the whole body while standing). Starts and ends in the stance. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Loadout")
 	TObjectPtr<UAnimSequence> AttackAnimation;
 

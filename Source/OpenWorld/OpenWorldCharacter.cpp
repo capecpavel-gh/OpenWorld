@@ -84,6 +84,8 @@ AOpenWorldCharacter::AOpenWorldCharacter()
 	static ConstructorHelpers::FObjectFinder<UStaticMesh> SwordMesh(TEXT("/Game/Weapons/Sword/SM_Sword.SM_Sword"));
 	static ConstructorHelpers::FObjectFinder<UStaticMesh> ShieldMesh(TEXT("/Game/Weapons/Shield/SM_Shield.SM_Shield"));
 	static ConstructorHelpers::FObjectFinder<UStaticMesh> GreatswordMesh(TEXT("/Game/Weapons/Greatsword/SM_Greatsword.SM_Greatsword"));
+	static ConstructorHelpers::FObjectFinder<UAnimSequence> SwordStance(TEXT("/Game/Weapons/Sword/Anims/AS_Stance_SwordShield.AS_Stance_SwordShield"));
+	static ConstructorHelpers::FObjectFinder<UAnimSequence> GreatswordStance(TEXT("/Game/Weapons/Greatsword/Anims/AS_Stance_Greatsword.AS_Stance_Greatsword"));
 	static ConstructorHelpers::FObjectFinder<UAnimSequence> SwordSlash(TEXT("/Game/Weapons/Sword/Anims/AS_SwordSlash.AS_SwordSlash"));
 	static ConstructorHelpers::FObjectFinder<UAnimSequence> GreatswordSlash(TEXT("/Game/Weapons/Greatsword/Anims/AS_GreatswordSlash.AS_GreatswordSlash"));
 
@@ -91,6 +93,7 @@ AOpenWorldCharacter::AOpenWorldCharacter()
 	SwordAndShield.DisplayName = FText::FromString(TEXT("Sword and shield"));
 	SwordAndShield.MainHandMesh = SwordMesh.Object;
 	SwordAndShield.OffHandMesh = ShieldMesh.Object;
+	SwordAndShield.StanceAnimation = SwordStance.Object;
 	SwordAndShield.AttackAnimation = SwordSlash.Object;
 	SwordAndShield.HitTime = 0.38f;
 	SwordAndShield.ComboTime = 0.66f;
@@ -99,6 +102,7 @@ AOpenWorldCharacter::AOpenWorldCharacter()
 	FOpenWorldLoadout& TwoHanded = Loadouts.AddDefaulted_GetRef();
 	TwoHanded.DisplayName = FText::FromString(TEXT("Two-handed sword"));
 	TwoHanded.MainHandMesh = GreatswordMesh.Object;
+	TwoHanded.StanceAnimation = GreatswordStance.Object;
 	TwoHanded.AttackAnimation = GreatswordSlash.Object;
 	TwoHanded.HitTime = 0.47f;
 	TwoHanded.ComboTime = 0.84f;
@@ -130,6 +134,12 @@ void AOpenWorldCharacter::BeginPlay()
 
 #if !UE_BUILD_SHIPPING
 	bSelfTest = FParse::Param(FCommandLine::Get(), TEXT("OWSelfTest"));
+	if (bSelfTest)
+	{
+		// Without a renderer the pose is not evaluated unless asked to. Ask from the very first frame,
+		// so the test also covers the blend into the starting stance.
+		GetMesh()->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
+	}
 #endif
 }
 
@@ -309,6 +319,12 @@ void AOpenWorldCharacter::EquipLoadout(int32 Index)
 	const FOpenWorldLoadout& Loadout = Loadouts[Index];
 	Weapon->SetStaticMesh(Loadout.MainHandMesh);
 	OffHandWeapon->SetStaticMesh(Loadout.OffHandMesh);
+
+	// The arms carry this equipment in its own pose, clear of the body, in every locomotion state
+	if (UOpenWorldAnimInstance* AnimInstance = GetOverlayAnimInstance())
+	{
+		AnimInstance->SetStance(Loadout.StanceAnimation);
+	}
 }
 
 void AOpenWorldCharacter::EquipNextLoadout()

@@ -14,6 +14,25 @@ namespace
 		FAnimationPoseData PoseData(Context);
 		Sequence->GetAnimationPose(PoseData, FAnimExtractContext(static_cast<double>(Time), false));
 	}
+
+	/**
+	 *  Blend of two bone transforms. Unlike FTransform::BlendWith it accepts rotations that are not
+	 *  normalized (poses coming out of an anim graph often are not) and always returns a normalized one.
+	 */
+	FTransform BlendBone(const FTransform& From, const FTransform& To, float Alpha)
+	{
+		FQuat A = From.GetRotation().GetNormalized();
+		FQuat B = To.GetRotation().GetNormalized();
+		// take the short way around
+		if ((A | B) < 0.0)
+		{
+			B = B * -1.0;
+		}
+		const FQuat Rotation = (A * (1.0 - Alpha) + B * Alpha).GetNormalized();
+		return FTransform(Rotation,
+			FMath::Lerp(From.GetTranslation(), To.GetTranslation(), static_cast<double>(Alpha)),
+			FMath::Lerp(From.GetScale3D(), To.GetScale3D(), static_cast<double>(Alpha)));
+	}
 }
 
 void FOpenWorldAnimInstanceProxy::PreUpdate(UAnimInstance* InAnimInstance, float DeltaSeconds)
@@ -30,6 +49,10 @@ void FOpenWorldAnimInstanceProxy::PreUpdate(UAnimInstance* InAnimInstance, float
 		Weight = Instance->OverlayWeight;
 		LowerBodyWeight = Instance->LowerBodyWeight;
 		UpperBodyRootBone = Instance->UpperBodyRootBone;
+		Stance = Instance->StanceSequence;
+		PreviousStance = Instance->PreviousStanceSequence;
+		StanceAlpha = Instance->StanceAlpha;
+		StanceRootBones = Instance->StanceRootBones;
 	}
 }
 
@@ -41,10 +64,48 @@ bool FOpenWorldAnimInstanceProxy::Evaluate_WithRoot(FPoseContext& Output, FAnimN
 	// Only the main graph gets the overlay, not linked layers
 	if (InRootNode == GetRootNode())
 	{
+		UpdateBoneMasks(Output.Pose.GetBoneContainer());
+		ApplyStance(Output);
 		ApplyOverlay(Output);
 	}
 
 	return true;
+}
+
+void FOpenWorldAnimInstanceProxy::ApplyStance(FPoseContext& Output)
+{
+	const bool bBlending = StanceAlpha < 1.f;
+	if (Stance == nullptr && !(bBlending && PreviousStance != nullptr))
+	{
+		return;
+	}
+
+	// The arms go from the previous stance (or the Anim Blueprint's arms) to the current one (or back to the Blueprint's)
+	FPoseContext To(Output);
+	if (Stance != nullptr)
+	{
+		SampleSequence(To, Stance, 0.f);
+	}
+	FPoseContext From(Output);
+	if (bBlending && PreviousStance != nullptr)
+	{
+		SampleSequence(From, PreviousStance, 0.f);
+	}
+
+	for (const FCompactPoseBoneIndex BoneIndex : Output.Pose.ForEachBoneIndex())
+	{
+		if (!StanceMask[BoneIndex.GetInt()])
+		{
+			continue;
+		}
+
+		FTransform Target = To.Pose[BoneIndex];
+		if (bBlending)
+		{
+			Target = BlendBone(From.Pose[BoneIndex], To.Pose[BoneIndex], StanceAlpha);
+		}
+		Output.Pose[BoneIndex] = Target;
+	}
 }
 
 void FOpenWorldAnimInstanceProxy::ApplyOverlay(FPoseContext& Output)
@@ -64,8 +125,6 @@ void FOpenWorldAnimInstanceProxy::ApplyOverlay(FPoseContext& Output)
 		SampleSequence(Previous, PreviousSequence, PreviousTime);
 	}
 
-	UpdateBoneMask(Output.Pose.GetBoneContainer());
-
 	for (const FCompactPoseBoneIndex BoneIndex : Output.Pose.ForEachBoneIndex())
 	{
 		const float BoneWeight = Weight * (UpperBodyMask[BoneIndex.GetInt()] ? 1.f : LowerBodyWeight);
@@ -77,51 +136,70 @@ void FOpenWorldAnimInstanceProxy::ApplyOverlay(FPoseContext& Output)
 		FTransform Target = Overlay.Pose[BoneIndex];
 		if (bCrossfading)
 		{
-			Target = Previous.Pose[BoneIndex];
-			Target.BlendWith(Overlay.Pose[BoneIndex], CrossfadeAlpha);
+			Target = BlendBone(Previous.Pose[BoneIndex], Overlay.Pose[BoneIndex], CrossfadeAlpha);
 		}
 
 		FTransform& Bone = Output.Pose[BoneIndex];
-		Bone.BlendWith(Target, BoneWeight);
-		Bone.NormalizeRotation();
+		Bone = BlendBone(Bone, Target, BoneWeight);
 	}
 }
 
-void FOpenWorldAnimInstanceProxy::UpdateBoneMask(const FBoneContainer& Bones)
+void FOpenWorldAnimInstanceProxy::UpdateBoneMasks(const FBoneContainer& Bones)
 {
 	const int32 NumBones = Bones.GetCompactPoseNumBones();
-	if (UpperBodyMask.Num() == NumBones && MaskSerialNumber == Bones.GetSerialNumber() && MaskRootBone == UpperBodyRootBone)
+	if (UpperBodyMask.Num() == NumBones && MaskSerialNumber == Bones.GetSerialNumber()
+		&& MaskRootBone == UpperBodyRootBone && MaskStanceRootBones == StanceRootBones)
 	{
 		return;
 	}
 
 	const FReferenceSkeleton& RefSkeleton = Bones.GetReferenceSkeleton();
 	const int32 UpperBodyRoot = RefSkeleton.FindBoneIndex(UpperBodyRootBone);
+	TArray<int32, TInlineAllocator<4>> StanceRoots;
+	for (const FName& Name : StanceRootBones)
+	{
+		StanceRoots.Add(RefSkeleton.FindBoneIndex(Name));
+	}
 
 	UpperBodyMask.SetNumZeroed(NumBones);
+	StanceMask.SetNumZeroed(NumBones);
 	for (int32 Index = 0; Index < NumBones; ++Index)
 	{
 		bool bUpperBody = false;
+		bool bStance = false;
+		// Walk up the hierarchy: a bone belongs to a group if the group's root is the bone or one of its ancestors
 		int32 MeshBone = Bones.MakeMeshPoseIndex(FCompactPoseBoneIndex(Index)).GetInt();
 		while (MeshBone != INDEX_NONE)
 		{
-			if (MeshBone == UpperBodyRoot)
-			{
-				bUpperBody = true;
-				break;
-			}
+			bUpperBody |= MeshBone == UpperBodyRoot;
+			bStance |= StanceRoots.Contains(MeshBone);
 			MeshBone = RefSkeleton.GetParentIndex(MeshBone);
 		}
 		UpperBodyMask[Index] = bUpperBody ? 1 : 0;
+		StanceMask[Index] = bStance ? 1 : 0;
 	}
 
 	MaskSerialNumber = Bones.GetSerialNumber();
 	MaskRootBone = UpperBodyRootBone;
+	MaskStanceRootBones = StanceRootBones;
 }
 
 FAnimInstanceProxy* UOpenWorldAnimInstance::CreateAnimInstanceProxy()
 {
 	return new FOpenWorldAnimInstanceProxy(this);
+}
+
+void UOpenWorldAnimInstance::SetStance(UAnimSequence* Sequence, float BlendTime)
+{
+	if (Sequence == StanceSequence)
+	{
+		return;
+	}
+
+	PreviousStanceSequence = StanceSequence;
+	StanceSequence = Sequence;
+	StanceBlendTime = FMath::Max(BlendTime, 0.f);
+	StanceAlpha = StanceBlendTime > 0.f ? 0.f : 1.f;
 }
 
 void UOpenWorldAnimInstance::PlayOverlay(UAnimSequence* Sequence, float BlendInTime, float BlendOutTime)
@@ -173,6 +251,15 @@ void UOpenWorldAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		bStanding = Pawn->GetVelocity().Size2D() <= FullBodyMaxSpeed && !(Movement && Movement->IsFalling());
 	}
 	LowerBodyWeight = FMath::FInterpTo(LowerBodyWeight, bStanding ? 1.f : 0.f, DeltaSeconds, LowerBodyBlendSpeed);
+
+	if (StanceAlpha < 1.f)
+	{
+		StanceAlpha = StanceBlendTime > 0.f ? FMath::Min(1.f, StanceAlpha + DeltaSeconds / StanceBlendTime) : 1.f;
+		if (StanceAlpha >= 1.f)
+		{
+			PreviousStanceSequence = nullptr;
+		}
+	}
 
 	if (OverlaySequence == nullptr)
 	{

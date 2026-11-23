@@ -31,3 +31,7 @@ Plugins/*/Intermediate/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# Python
+__pycache__/
+*.pyc
