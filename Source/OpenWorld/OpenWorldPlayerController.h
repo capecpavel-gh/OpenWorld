@@ -40,6 +40,18 @@ protected:
 	UPROPERTY(EditAnywhere, Config, Category = "Input|Touch Controls")
 	bool bForceTouchControls = false;
 
+	/** Show the mouse cursor; it hides while a mouse button is held to rotate the camera, and returns to the same spot */
+	UPROPERTY(EditAnywhere, Category="Camera")
+	bool bUseMouseCursorCamera = true;
+
+	/** Lowest camera pitch (looking down from above) */
+	UPROPERTY(EditAnywhere, Category="Camera", meta=(ClampMin="-89.9", ClampMax="0"))
+	float CameraPitchMin = -80.f;
+
+	/** Highest camera pitch (looking up from below) */
+	UPROPERTY(EditAnywhere, Category="Camera", meta=(ClampMin="0", ClampMax="89.9"))
+	float CameraPitchMax = 45.f;
+
 	/** Gameplay initialization */
 	virtual void BeginPlay() override;
 

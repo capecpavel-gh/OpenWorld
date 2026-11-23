@@ -31,6 +31,27 @@ void AOpenWorldPlayerController::BeginPlay()
 		}
 
 	}
+
+	if (IsLocalPlayerController())
+	{
+		if (PlayerCameraManager)
+		{
+			PlayerCameraManager->ViewPitchMin = CameraPitchMin;
+			PlayerCameraManager->ViewPitchMax = CameraPitchMax;
+		}
+
+		if (bUseMouseCursorCamera && !ShouldUseTouchControls())
+		{
+			// Cursor is visible; while a mouse button is held the viewport captures the mouse,
+			// hides the cursor and restores it to the same position on release.
+			SetShowMouseCursor(true);
+
+			FInputModeGameAndUI InputMode;
+			InputMode.SetHideCursorDuringCapture(true);
+			InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+			SetInputMode(InputMode);
+		}
+	}
 }
 
 void AOpenWorldPlayerController::SetupInputComponent()

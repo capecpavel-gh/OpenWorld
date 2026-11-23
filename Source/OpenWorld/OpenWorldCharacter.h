@@ -10,6 +10,7 @@
 class USpringArmComponent;
 class UCameraComponent;
 class UInputAction;
+class UInputMappingContext;
 struct FInputActionValue;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogTemplateCharacter, Log, All);
@@ -45,19 +46,96 @@ protected:
 	UPROPERTY(EditAnywhere, Category="Input")
 	UInputAction* LookAction;
 
-	/** Mouse Look Input Action */
+	/** Mouse Look Input Action (only applied while a camera mouse button is held) */
 	UPROPERTY(EditAnywhere, Category="Input")
 	UInputAction* MouseLookAction;
+
+	/** Camera zoom (mouse wheel, Axis1D). Created at runtime if left empty. */
+	UPROPERTY(EditAnywhere, Category="Input|Camera")
+	TObjectPtr<UInputAction> CameraZoomAction;
+
+	/** Hold to rotate the camera and turn the character with it (right mouse button). Created at runtime if left empty. */
+	UPROPERTY(EditAnywhere, Category="Input|Camera")
+	TObjectPtr<UInputAction> CameraRotateAction;
+
+	/** Hold to orbit the camera around the character without turning it (left mouse button). Created at runtime if left empty. */
+	UPROPERTY(EditAnywhere, Category="Input|Camera")
+	TObjectPtr<UInputAction> CameraOrbitAction;
+
+	/** Mapping context for the camera actions. Created at runtime if left empty. */
+	UPROPERTY(EditAnywhere, Category="Input|Camera")
+	TObjectPtr<UInputMappingContext> CameraMappingContext;
+
+	/** Priority of the camera mapping context (higher wins over the default contexts) */
+	UPROPERTY(EditAnywhere, Category="Input|Camera")
+	int32 CameraMappingPriority = 1;
+
+	/** Closest camera distance from the character */
+	UPROPERTY(EditAnywhere, Category="Camera|Zoom", meta=(ClampMin="0", Units="cm"))
+	float MinZoomDistance = 150.f;
+
+	/** Farthest camera distance from the character */
+	UPROPERTY(EditAnywhere, Category="Camera|Zoom", meta=(ClampMin="0", Units="cm"))
+	float MaxZoomDistance = 1500.f;
+
+	/** Distance change per mouse wheel notch */
+	UPROPERTY(EditAnywhere, Category="Camera|Zoom", meta=(ClampMin="0", Units="cm"))
+	float ZoomStep = 100.f;
+
+	/** How quickly the camera reaches the target zoom distance (0 = instant) */
+	UPROPERTY(EditAnywhere, Category="Camera|Zoom", meta=(ClampMin="0"))
+	float ZoomInterpSpeed = 10.f;
+
+	/** Holding both camera buttons walks the character forward */
+	UPROPERTY(EditAnywhere, Category="Camera|Rotation")
+	bool bBothButtonsMoveForward = true;
+
+	/** How fast the character turns to face the camera direction while rotating (degrees per second) */
+	UPROPERTY(EditAnywhere, Category="Camera|Rotation", meta=(ClampMin="0"))
+	float FaceCameraRotationRate = 720.f;
 
 public:
 
 	/** Constructor */
-	AOpenWorldCharacter();	
+	AOpenWorldCharacter();
+
+	virtual void Tick(float DeltaSeconds) override;
 
 protected:
 
+	virtual void BeginPlay() override;
+
 	/** Initialize input action bindings */
 	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
+
+	/** Creates the camera input actions and mapping context if they were not assigned, and registers the context */
+	void SetupCameraInput();
+
+	void MouseLook(const FInputActionValue& Value);
+	void CameraZoom(const FInputActionValue& Value);
+	void CameraRotateStarted();
+	void CameraRotateCompleted();
+	void CameraOrbitStarted();
+	void CameraOrbitCompleted();
+
+	/** Switches between "face movement direction" and "face camera direction" */
+	void UpdateRotationMode();
+
+	/** True while a camera mouse button is held */
+	bool IsCameraControlActive() const { return bCameraRotating || bCameraOrbiting; }
+
+private:
+
+	float TargetZoomDistance = 400.f;
+	float DefaultRotationRateYaw = 500.f;
+	bool bCameraRotating = false;
+	bool bCameraOrbiting = false;
+
+public:
+
+	/** Sets the camera distance (clamped to the zoom limits) */
+	UFUNCTION(BlueprintCallable, Category="Camera")
+	void SetZoomDistance(float Distance, bool bInstant = false);
 
 protected:
 
